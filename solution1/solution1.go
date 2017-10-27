@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -13,15 +14,38 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"os/user"
 	"path"
 	"strings"
 	"time"
+
+	"github.com/giantswarm/operator-workshop/mysqlops"
 )
 
-// Notes:
-// - with API objects has to be created with JSON format even though kbuectl
-//   allows YAML
+/*
+Notes:
+
+- two options incluster and remote; remote is useful for testing and
+  prototyping
+- with API objects has to be created with JSON format even though kbuectl
+  allows YAML
+
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+// CustomObject represents the AWS TPR's custom object. It holds the
+// specifications of the resource the AWS operator is interested in.
+type CustomObject struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	Spec              Spec `json:"spec"`
+
+
+	Items []*CustomObject `json:"items"`
+
+*/
 
 func init() {
 	log.SetFlags(log.Ldate | log.Ltime | log.LUTC)
@@ -35,14 +59,97 @@ type Config struct {
 	K8sCAFile  string
 }
 
+// MySQLConfig is custom object of mysqlconfigs.containerconf.de custom
+// resource.
+type MySQLConfig struct {
+	Spec MySQLConfigSpec `json:"spec"`
+}
+
+func (m MySQLConfig) Validate() error {
+	if err := m.Spec.Validate(); err != nil {
+		return fmt.Errorf("spec is not valid: %s", err)
+	}
+	return nil
+}
+
+// MySQLConfigSpec is custom object specification. Represents the desired state
+// towards which the operator reconciles. It also includes information
+// necessary to perform the reconciliation, i.e. database access information.
+type MySQLConfigSpec struct {
+	// Service is service name which points to a MySQL server.
+	Service string `json:"service"`
+	// Port is the MySQL server listen port.
+	Port int `json:"port"`
+
+	// Database is database name to be created.
+	Database string `json:"database"`
+	// Owner is the database owner.
+	Owner string `json:"owner"`
+}
+
+func (s MySQLConfigSpec) Validate() error {
+	if s.Service == "" {
+		return fmt.Errorf("service is not set")
+	}
+	if s.Port == 0 {
+		return fmt.Errorf("port is not set")
+	}
+	if s.Database == "" {
+		return fmt.Errorf("database is not set")
+	}
+	if s.Owner == "" {
+		return fmt.Errorf("owner is not set")
+	}
+	return nil
+}
+
+// MySQLConfigList represents a list of custom objects. It is useful for
+// decoding list API calls.
+type MySQLConfigList struct {
+	Items []*MySQLConfig `json:"items"`
+}
+
 func main() {
+	ctx := context.Background()
+
 	config := parseFlags()
 
-	err := mainError(config)
-	if err != nil {
-		log.SetPrefix("E ")
-		log.Printf("%s", err)
-		os.Exit(1)
+	mainExitCodeCh := make(chan int)
+	mainCtx, mainCancelFunc := context.WithCancel(ctx)
+
+	// Run actual code.
+	go func() {
+		err := mainError(mainCtx, config)
+		if err != nil {
+			log.SetPrefix("E ")
+			log.Printf("%s", err)
+			mainExitCodeCh <- 1
+		}
+		mainExitCodeCh <- 0
+	}()
+
+	sigCh := make(chan os.Signal, 2)
+	signal.Notify(sigCh, os.Interrupt, os.Kill)
+
+	// Handle graceful stop.
+	gracefulStop := false
+	for {
+		select {
+		case code := <-mainExitCodeCh:
+			log.Printf("exiting: code=%d", code)
+			os.Exit(code)
+		case sig := <-sigCh:
+			// On second SIGKILL exit immediately.
+			if sig == os.Kill && gracefulStop {
+				log.Printf("exiting: forced exit code=1")
+				os.Exit(1)
+			}
+			if !gracefulStop {
+				log.Printf("exiting: trying to preform graceful stop")
+				gracefulStop = true
+				mainCancelFunc()
+			}
+		}
 	}
 }
 
@@ -78,33 +185,30 @@ func parseFlags() Config {
 	return config
 }
 
-func mainError(config Config) error {
+func mainError(ctx context.Context, config Config) error {
 	k8sClient, err := newHttpClient(config)
 	if err != nil {
-		return err
+		return fmt.Errorf("creating K8s client: %s", err)
 	}
 
 	// Create Custom Resource Definition.
 	{
 		log.Printf("creating custom resource")
 
-		res, err := k8sClient.Post(
-			config.K8sServer+"/apis/apiextensions.k8s.io/v1beta1/customresourcedefinitions",
-			"application/json",
-			strings.NewReader(crdJson),
-		)
+		url := config.K8sServer + "/apis/apiextensions.k8s.io/v1beta1/customresourcedefinitions"
+		res, err := k8sClient.Post(url, "application/json", strings.NewReader(crdJson))
 		if err != nil {
-			return err
+			return fmt.Errorf("creating custom resource: requesting url=%s: %s", url, err)
 		}
-		defer res.Body.Close()
+
+		body := readerToBytesTrimSpace(res.Body)
+		res.Body.Close()
 
 		if res.StatusCode == http.StatusOK || res.StatusCode == http.StatusCreated {
 			log.Printf("creating custom resource: created")
 		} else {
 			alreadyExists := false
 			errStr := "bad status"
-
-			body := readerToBytesTrimSpace(res.Body)
 
 			// Check if already exists.
 			if res.StatusCode == http.StatusConflict {
@@ -133,13 +237,14 @@ func mainError(config Config) error {
 		for ; ; attempt++ {
 			log.Printf("checking custom resource readiness attempt=%d", attempt)
 
-			res, err := k8sClient.Get(
-				config.K8sServer + "/apis/containerconf.de/v1/mysqlconfigs",
-			)
+			url := config.K8sServer + "/apis/apiextensions.k8s.io/v1beta1/customresourcedefinitions"
+			res, err := k8sClient.Get(url)
 			if err != nil {
-				return err
+				return fmt.Errorf("checking custom resource readiness attempt=%d url=%s: %s", attempt, url, err)
 			}
-			defer res.Body.Close()
+
+			body := readerToBytesTrimSpace(res.Body)
+			res.Body.Close()
 
 			if res.StatusCode == http.StatusOK {
 				log.Printf("checking custom resource readiness attempt=%d: ready", attempt)
@@ -147,11 +252,108 @@ func mainError(config Config) error {
 			}
 
 			if attempt == maxAttempts {
-				return fmt.Errorf("checking custom resource readiness attempt=%d: bad status status=%d body=%#q", attempt, res.StatusCode, readerToBytesTrimSpace(res.Body))
+				return fmt.Errorf("checking custom resource readiness attempt=%d: bad status status=%d body=%#q", attempt, res.StatusCode, body)
 			}
 
+			log.Printf("checking custom resource readiness attempt=%d: not ready yet", attempt)
 			time.Sleep(checkInterval)
 		}
+	}
+
+	// Start reconciliation loop.
+	reconciliationCnt := 1
+	reconciliationInterval := time.Second * 1
+	for ; ; reconciliationCnt++ {
+		log.Printf("reconciling loopCnt=%d", reconciliationCnt)
+
+		if ctx.Err() == context.Canceled {
+			log.Printf("reconciling loopCnt=%d: context cancelled", reconciliationCnt)
+			return nil
+		}
+
+		url := config.K8sServer + "/apis/containerconf.de/v1/mysqlconfigs"
+		res, err := k8sClient.Get(url)
+		if err != nil {
+			return fmt.Errorf("reconciling loopCnt=%d: %s", reconciliationCnt, url, err)
+		}
+
+		body := readerToBytesTrimSpace(res.Body)
+		res.Body.Close()
+
+		if res.StatusCode != http.StatusOK {
+			log.Printf("reconciling loopCnt=%d: error client response status status=%d body=%#q", reconciliationCnt, res.StatusCode, body)
+			continue
+		}
+
+		var configs MySQLConfigList
+		err = json.Unmarshal(body, &configs)
+		if err != nil {
+			log.Printf("reconciling loopCnt=%d: error unmarshalling mysqlconfigs list body=%#q: %s", reconciliationCnt, body, err)
+			continue
+		}
+
+		for _, config := range configs.Items {
+			err := config.Validate()
+			if err != nil {
+				log.Printf("reconciling loopCnt=%d: error invalid mysqlconfig=%#v: %s", reconciliationCnt, *config, err)
+				continue
+			}
+
+			var ops *mysqlops.MySQLOps
+			{
+				ops, err = mysqlops.New(mysqlops.Config{})
+				if err != nil {
+					log.Printf("reconciling loopCnt=%d obj=%#v: error creating MySQLOps: %s", reconciliationCnt, *config, err)
+					continue
+				}
+			}
+
+			// Reconcile MySQLConfig.
+			{
+				dbs, err := ops.ListDatabases()
+				if err != nil {
+					log.Printf("reconciling loopCnt=%d obj=%#v: error listing databases: %s", reconciliationCnt, *config, err)
+					continue
+				}
+
+				var foundDB mysqlops.Database
+				for _, db := range dbs {
+					if db.Name == config.Spec.Database {
+						foundDB = db
+						break
+					}
+				}
+
+				if foundDB.Name != "" {
+					db := foundDB
+
+					if db.Owner == config.Spec.Owner {
+						log.Printf("reconciling loopCnt=%d obj=%#v: object already reconcilled", reconciliationCnt, *config)
+						continue
+					}
+
+					log.Printf("reconciling loopCnt=%d obj=%#v: changing owner=%#q", reconciliationCnt, *config, db.Owner)
+					err := ops.ChangeDatabaseOwner(config.Spec.Database, config.Spec.Owner)
+					if err != nil {
+						log.Printf("reconciling loopCnt=%d obj=%#v: changing owner=%#q: error: %s", reconciliationCnt, *config, db.Owner, err)
+						continue
+					}
+					log.Printf("reconciling loopCnt=%d obj=%#v: changing owner=%#q: changed", reconciliationCnt, *config, db.Owner)
+				} else {
+					log.Printf("reconciling loopCnt=%d obj=%#v: creating database", reconciliationCnt, *config, err)
+					err := ops.CreateDatabase(config.Spec.Database, config.Spec.Owner)
+					if err != nil {
+						log.Printf("reconciling loopCnt=%d obj=%#v: creating database: error: %s", reconciliationCnt, *config, err)
+						continue
+					}
+					log.Printf("reconciling loopCnt=%d obj=%#v: creating database: created", reconciliationCnt, *config)
+				}
+			}
+
+		}
+
+		log.Printf("reconciling loopCnt=%d: reconciled", reconciliationCnt)
+		time.Sleep(reconciliationInterval)
 	}
 
 	return nil
