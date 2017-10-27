@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -17,10 +16,15 @@ import (
 	"os/user"
 	"path"
 	"strings"
+	"time"
 )
 
+// Notes:
+// - with API objects has to be created with JSON format even though kbuectl
+//   allows YAML
+
 func init() {
-	log.SetFlags(log.Ldate | log.Ltime | log.LUTC | log.Lshortfile)
+	log.SetFlags(log.Ldate | log.Ltime | log.LUTC)
 	log.SetPrefix("I ")
 }
 
@@ -94,32 +98,60 @@ func mainError(config Config) error {
 		}
 		defer res.Body.Close()
 
-		switch res.StatusCode {
-		case http.StatusConflict:
-			m := make(map[string]interface{})
-			err := json.NewDecoder(res.Body).Decode(&m)
-			return fmt.Errorf("creating custom resource: decoding body=%s", readerToString(res.Body))
-		case http.StatusOK:
-			log.Printf("created custom resource")
-		default:
-			return fmt.Errorf("creating custom resource: bad status status=%d body=%s", res.StatusCode, readerToString(res.Body))
+		if res.StatusCode == http.StatusOK || res.StatusCode == http.StatusCreated {
+			log.Printf("creating custom resource: created")
+		} else {
+			alreadyExists := false
+			errStr := "bad status"
+
+			body := readerToBytesTrimSpace(res.Body)
+
+			// Check if already exists.
+			if res.StatusCode == http.StatusConflict {
+				r, err := isStatusAlreadyExists(body)
+				if err != nil {
+					errStr = err.Error()
+				} else {
+					alreadyExists = r
+				}
+			}
+
+			if alreadyExists {
+				log.Printf("creating custom resource: created")
+			} else {
+				return fmt.Errorf("creating custom resource: %s status=%d body=%#q", errStr, res.StatusCode, body)
+			}
 		}
 	}
 
+	// Wait for the Custom Resource to be ready.
 	{
-		res, err := k8sClient.Get(
-			config.K8sServer + "/apis/apiextensions.k8s.io/v1beta1/customresourcedefinitions",
-		)
-		if err != nil {
-			return err
-		}
-		defer res.Body.Close()
+		attempt := 1
+		maxAttempts := 10
+		checkInterval := time.Millisecond * 200
 
-		if res.StatusCode != http.StatusOK {
-			return errors.New("creating custom resource: " + readerToString(res.Body))
-		}
+		for ; ; attempt++ {
+			log.Printf("checking custom resource readiness attempt=%d", attempt)
 
-		log.Print(readerToString(res.Body))
+			res, err := k8sClient.Get(
+				config.K8sServer + "/apis/containerconf.de/v1/mysqlconfigs",
+			)
+			if err != nil {
+				return err
+			}
+			defer res.Body.Close()
+
+			if res.StatusCode == http.StatusOK {
+				log.Printf("checking custom resource readiness attempt=%d: ready", attempt)
+				break
+			}
+
+			if attempt == maxAttempts {
+				return fmt.Errorf("checking custom resource readiness attempt=%d: bad status status=%d body=%#q", attempt, res.StatusCode, readerToBytesTrimSpace(res.Body))
+			}
+
+			time.Sleep(checkInterval)
+		}
 	}
 
 	return nil
@@ -153,10 +185,24 @@ func newHttpClient(config Config) (*http.Client, error) {
 	return client, nil
 }
 
-func readerToString(r io.Reader) string {
+func readerToBytesTrimSpace(r io.Reader) []byte {
 	buf := new(bytes.Buffer)
 	buf.ReadFrom(r)
-	return buf.String()
+	b := buf.Bytes()
+	b = bytes.TrimSpace(b)
+	return b
+}
+
+func isStatusAlreadyExists(body []byte) (bool, error) {
+	m := make(map[string]interface{})
+	err := json.Unmarshal(body, &m)
+	if err != nil {
+		return false, fmt.Errorf("creating custom resource: %s: decoding body=%s", err, body)
+	}
+	if m["kind"] != "Status" {
+		return false, nil
+	}
+	return m["reason"] == "AlreadyExists", nil
 }
 
 // crdJson content in YAML format can be found in crd.yaml file.
