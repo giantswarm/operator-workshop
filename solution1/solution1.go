@@ -217,7 +217,7 @@ func mainError(ctx context.Context, config Config) error {
 			}
 
 			if alreadyExists {
-				log.Printf("creating custom resource: created")
+				log.Printf("creating custom resource: already exists")
 			} else {
 				return fmt.Errorf("creating custom resource: %s status=%d body=%#q", errStr, res.StatusCode, body)
 			}
