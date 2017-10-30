@@ -185,9 +185,9 @@ func mainError(ctx context.Context, config Config) error {
 				"names": {
 					"plural": "mysqlconfigs",
 					"singular": "mysqlconfig",
-					"kind": "MySQLConfig"
-				},
-				"shortNames": []
+					"kind": "MySQLConfig",
+					"shortNames": []
+				}
 			}
 		}`
 
