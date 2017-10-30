@@ -171,6 +171,26 @@ func mainError(ctx context.Context, config Config) error {
 	{
 		log.Printf("creating custom resource")
 
+		// crdJson content in YAML format can be found in crd.yaml file.
+		crdJson := `{
+			"apiVersion": "apiextensions.k8s.io/v1beta1",
+			"kind": "CustomResourceDefinition",
+			"metadata": {
+				"name": "mysqlconfigs.containerconf.de"
+			},
+			"spec": {
+				"group": "containerconf.de",
+				"version": "v1",
+				"scope": "Namespaced",
+				"names": {
+					"plural": "mysqlconfigs",
+					"singular": "mysqlconfig",
+					"kind": "MySQLConfig"
+				},
+				"shortNames": []
+			}
+		}`
+
 		url := config.K8sServer + "/apis/apiextensions.k8s.io/v1beta1/customresourcedefinitions"
 		res, err := k8sClient.Post(url, "application/json", strings.NewReader(crdJson))
 		if err != nil {
@@ -382,23 +402,3 @@ func isStatusAlreadyExists(body []byte) (bool, error) {
 	}
 	return m["reason"] == "AlreadyExists", nil
 }
-
-// crdJson content in YAML format can be found in crd.yaml file.
-const crdJson = `{
-	"apiVersion": "apiextensions.k8s.io/v1beta1",
-	"kind": "CustomResourceDefinition",
-	"metadata": {
-		"name": "mysqlconfigs.containerconf.de"
-	},
-	"spec": {
-		"group": "containerconf.de",
-		"version": "v1",
-		"scope": "Namespaced",
-		"names": {
-			"plural": "mysqlconfigs",
-			"singular": "mysqlconfig",
-			"kind": "MySQLConfig"
-		},
-		"shortNames": []
-	}
-}`
