@@ -23,30 +23,6 @@ import (
 	"github.com/giantswarm/operator-workshop/mysqlops"
 )
 
-/*
-Notes:
-
-- two options incluster and remote; remote is useful for testing and
-  prototyping
-- with API objects has to be created with JSON format even though kbuectl
-  allows YAML
-
-
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-)
-
-// CustomObject represents the AWS TPR's custom object. It holds the
-// specifications of the resource the AWS operator is interested in.
-type CustomObject struct {
-	metav1.TypeMeta   `json:",inline"`
-	metav1.ObjectMeta `json:"metadata,omitempty"`
-	Spec              Spec `json:"spec"`
-
-
-	Items []*CustomObject `json:"items"`
-
-*/
-
 func init() {
 	log.SetFlags(log.Ldate | log.Ltime | log.LUTC)
 	log.SetPrefix("I ")
@@ -156,13 +132,13 @@ func main() {
 func parseFlags() Config {
 	var config Config
 
-	var homedir string
+	var homeDir string
 	{
 		u, err := user.Current()
 		if err != nil {
-			homedir = os.Getenv("HOME")
+			homeDir = os.Getenv("HOME")
 		} else {
-			homedir = u.HomeDir
+			homeDir = u.HomeDir
 		}
 
 	}
@@ -177,9 +153,9 @@ func parseFlags() Config {
 	}
 
 	flag.StringVar(&config.K8sServer, "kubernetes.server", serverDefault, "Kubernetes API server address.")
-	flag.StringVar(&config.K8sCrtFile, "kubernetes.crt", path.Join(homedir, ".minikube/apiserver.crt"), "Kubernetes certificate file path.")
-	flag.StringVar(&config.K8sKeyFile, "kubernetes.key", path.Join(homedir, ".minikube/apiserver.key"), "Kubernetes key file path.")
-	flag.StringVar(&config.K8sCAFile, "kubernetes.ca", path.Join(homedir, ".minikube/ca.crt"), "Kubernetes CA file path.")
+	flag.StringVar(&config.K8sCrtFile, "kubernetes.crt", path.Join(homeDir, ".minikube/apiserver.crt"), "Kubernetes certificate file path.")
+	flag.StringVar(&config.K8sKeyFile, "kubernetes.key", path.Join(homeDir, ".minikube/apiserver.key"), "Kubernetes key file path.")
+	flag.StringVar(&config.K8sCAFile, "kubernetes.ca", path.Join(homeDir, ".minikube/ca.crt"), "Kubernetes CA file path.")
 	flag.Parse()
 
 	return config

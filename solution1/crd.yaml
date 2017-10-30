@@ -1,7 +1,7 @@
 # 
-# NOTE: This file is not used in the solution this serves an example how the yaml
-# file looks like. Content of this file is copied crdJson variable in JSON
-# format.
+# NOTE:  This file is not used in the solution. It is an example of what the
+# YAML file looks like. Content in this file is copied from the crdJson JSON
+# variable.
 #
 apiVersion: apiextensions.k8s.io/v1beta1
 kind: CustomResourceDefinition
