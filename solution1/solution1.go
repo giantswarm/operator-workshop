@@ -256,7 +256,10 @@ func mainError(ctx context.Context, config Config) error {
 		}
 	}
 
-	// Start reconciliation loop.
+	// Start reconciliation loop. In every iteration the operator lists
+	// current custom objects and reconciles towards the state described in
+	// them. The loop is inifinite, can be cancelled with cancelling the
+	// context.
 	reconciliationCnt := 1
 	reconciliationInterval := time.Second * 1
 	for ; ; reconciliationCnt++ {
