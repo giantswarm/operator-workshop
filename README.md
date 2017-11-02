@@ -1,9 +1,9 @@
 # operator-workshop
 
-## Create Postgres deployment
+## Create PostgreSQL deployment
 
 ```bash
-$ kubectl apply -f postgres.yaml
+$ kubectl apply -f postgresql.yaml
 ```
 
 ## Run postgresops
@@ -12,10 +12,10 @@ $ kubectl apply -f postgres.yaml
 $ go run main.go
 ```
 
-## Delete Postgres deployment
+## Delete PostgreSQL deployment
 
 ```bash
-$ kubectl delete -f postgres.yaml
+$ kubectl delete -f postgresql.yaml
 ```
 
 ## Connect to database (optional)
@@ -23,7 +23,7 @@ $ kubectl delete -f postgres.yaml
 Set password env var from secret.
 
 ```bash
-$ PGPASSWORD=$(kubectl get secret workshop-postgres -o jsonpath="{.data.postgres-password}" | base64 --decode; echo)
+$ PGPASSWORD=$(kubectl get secret workshop-postgresql -o jsonpath="{.data.postgresql-password}" | base64 --decode; echo)
 ```
 
 Start psql client.
@@ -32,7 +32,7 @@ Start psql client.
 $ kubectl run workshop-psql-client --rm --tty -i --image postgres \
    --env "PGPASSWORD=$PGPASSWORD" \
    --command -- psql -U postgres \
-   -h workshop-postgres postgres
+   -h workshop-postgresql postgres
 ```
 
 Delete psql client.

@@ -7,13 +7,13 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/giantswarm/operator-workshop/postgresops"
+	"github.com/giantswarm/operator-workshop/postgresqlops"
 )
 
-// PostgresConfigSpec is custom object specification. Represents the desired state
+// PostgresqlConfigSpec is custom object specification. Represents the desired state
 // towards which the operator reconciles. It also includes information
 // necessary to perform the reconciliation, i.e. database access information.
-type PostgresConfigSpec struct {
+type PostgresqlConfigSpec struct {
 	// Service is service name which points to a Postgres server.
 	Service string `json:"service"`
 	// Port is the Postgres server listen port.
@@ -38,44 +38,44 @@ func main() {
 }
 
 func mainWithError() error {
-	postgresHostname, err := getHostname()
+	postgresqlHostname, err := getHostname()
 	if err != nil {
-		return fmt.Errorf("getting postgres hostname: %s", err)
+		return fmt.Errorf("getting postgresql hostname: %s", err)
 	}
 
-	postgresPort, err := getServicePort("workshop-postgres")
+	postgresqlPort, err := getServicePort("workshop-postgresql")
 	if err != nil {
-		return fmt.Errorf("getting postgres hostname: %s", err)
+		return fmt.Errorf("getting postgresql service port: %s", err)
 	}
 
-	configSpec := PostgresConfigSpec{
-		Service:  postgresHostname,
-		Port:     postgresPort,
+	configSpec := PostgresqlConfigSpec{
+		Service:  postgresqlHostname,
+		Port:     postgresqlPort,
 		Database: "operator_workshop",
 		Owner:    "operator",
 	}
 
-	pgConfig := postgresops.Config{
+	pgConfig := postgresqlops.Config{
 		Host: configSpec.Service,
 		Port: configSpec.Port,
 	}
 
-	postgresOps, err := postgresops.New(pgConfig)
+	postgresqlOps, err := postgresqlops.New(pgConfig)
 	if err != nil {
-		return fmt.Errorf("creating PostgresOps: %s", err)
+		return fmt.Errorf("creating PostgresqlOps: %s", err)
 	}
 
-	err = postgresOps.CreateDatabase(configSpec.Database, configSpec.Owner)
+	err = postgresqlOps.CreateDatabase(configSpec.Database, configSpec.Owner)
 	if err != nil {
 		return fmt.Errorf("creating database: %s", err)
 	}
 
-	err = postgresOps.ChangeDatabaseOwner(configSpec.Database, "new_owner")
+	err = postgresqlOps.ChangeDatabaseOwner(configSpec.Database, "new_owner")
 	if err != nil {
 		return fmt.Errorf("changing database owner: %s", err)
 	}
 
-	dbs, err := postgresOps.ListDatabases()
+	dbs, err := postgresqlOps.ListDatabases()
 	if err != nil {
 		return fmt.Errorf("listing databases: %s", err)
 	}
@@ -86,7 +86,7 @@ func mainWithError() error {
 		log.Printf("Database: %s Owner: %s", db.Name, db.Owner)
 	}
 
-	err = postgresOps.DeleteDatabase(configSpec.Database)
+	err = postgresqlOps.DeleteDatabase(configSpec.Database)
 	if err != nil {
 		return fmt.Errorf("delete database: %s", err)
 	}
