@@ -52,11 +52,6 @@ func (m MySQLConfig) Validate() error {
 // towards which the operator reconciles. It also includes information
 // necessary to perform the reconciliation, i.e. database access information.
 type MySQLConfigSpec struct {
-	// Service is service name which points to a MySQL server.
-	Service string `json:"service"`
-	// Port is the MySQL server listen port.
-	Port int `json:"port"`
-
 	// Database is database name to be created.
 	Database string `json:"database"`
 	// Owner is the database owner.
@@ -64,12 +59,6 @@ type MySQLConfigSpec struct {
 }
 
 func (s MySQLConfigSpec) Validate() error {
-	if s.Service == "" {
-		return fmt.Errorf("service is not set")
-	}
-	if s.Port == 0 {
-		return fmt.Errorf("port is not set")
-	}
 	if s.Database == "" {
 		return fmt.Errorf("database is not set")
 	}
@@ -273,7 +262,7 @@ func mainError(ctx context.Context, config Config) error {
 		url := config.K8sServer + "/apis/containerconf.de/v1/mysqlconfigs"
 		res, err := k8sClient.Get(url)
 		if err != nil {
-			return fmt.Errorf("reconciling loopCnt=%d: %s", reconciliationCnt, url, err)
+			return fmt.Errorf("reconciling loopCnt=%d: %s url=%s", reconciliationCnt, err, url)
 		}
 
 		body := readerToBytesTrimSpace(res.Body)
@@ -287,75 +276,167 @@ func mainError(ctx context.Context, config Config) error {
 		var configs MySQLConfigList
 		err = json.Unmarshal(body, &configs)
 		if err != nil {
-			log.Printf("reconciling loopCnt=%d: error unmarshalling mysqlconfigs list body=%#q: %s", reconciliationCnt, body, err)
+			log.Printf("reconciling loopCnt=%d: error unmarshalling mysqlconfigs list: %s body=%#q", reconciliationCnt, err, body)
 			continue
 		}
 
-		for _, config := range configs.Items {
-			err := config.Validate()
+		var ops *mysqlops.MySQLOps
+		{
+			ops, err = mysqlops.New(mysqlops.Config{})
 			if err != nil {
-				log.Printf("reconciling loopCnt=%d: error invalid mysqlconfig=%#v: %s", reconciliationCnt, *config, err)
+				log.Printf("reconciling loopCnt=%d: error creating MySQLOps: %s", reconciliationCnt, err)
+				continue
+			}
+		}
+		// Many DB operations are repeated. This can be
+		// optimised but it isn't really an issue.
+		dbs, err := ops.ListDatabases()
+		if err != nil {
+			log.Printf("reconciling loopCnt=%d: error listing databases: %s", reconciliationCnt, err)
+			continue
+		}
+
+		// Reconcile updates and memorise valid objects. They will be
+		// used later during deletion.
+		var validObjs []*MySQLConfig
+
+		for _, obj := range configs.Items {
+			err := obj.Validate()
+			if err != nil {
+				log.Printf("reconciling loopCnt=%d: error invalid object: %s obj=%#v", reconciliationCnt, err, *obj)
 				continue
 			}
 
-			var ops *mysqlops.MySQLOps
-			{
-				ops, err = mysqlops.New(mysqlops.Config{})
-				if err != nil {
-					log.Printf("reconciling loopCnt=%d obj=%#v: error creating MySQLOps: %s", reconciliationCnt, *config, err)
-					continue
-				}
+			validObjs = append(validObjs, obj)
+
+			status, err := processUpdate(obj)
+			if err != nil {
+				log.Printf("reconciling loopCnt=%d: error: processing update obj=%#v: %s", reconciliationCnt, *obj, err)
+			} else {
+				log.Printf("reconciling loopCnt=%d: reconciled: %s obj=%#v", reconciliationCnt, status, *obj)
 			}
+		}
 
-			// Reconcile MySQLConfig.
-			{
-				dbs, err := ops.ListDatabases()
-				if err != nil {
-					log.Printf("reconciling loopCnt=%d obj=%#v: error listing databases: %s", reconciliationCnt, *config, err)
-					continue
-				}
+		// We still have to delete databases for custom objects that
+		// are gone. This assumes only the operator code does
+		// operataions on the database. Databases that still exists
+		// but aren't referenced by any custom object are subject of
+		// deletion.
+		{
+			for _, db := range dbs {
+				processed := false
 
-				var foundDB mysqlops.Database
-				for _, db := range dbs {
-					if db.Name == config.Spec.Database {
-						foundDB = db
+				for _, obj := range validObjs {
+					if obj.Spec.Database == db.Name {
+						processed = true
 						break
 					}
 				}
 
-				if foundDB.Name != "" {
-					db := foundDB
+				if processed {
+					continue
+				}
 
-					if db.Owner == config.Spec.Owner {
-						log.Printf("reconciling loopCnt=%d obj=%#v: object already reconcilled", reconciliationCnt, *config)
-						continue
-					}
+				obj := &MySQLConfig{
+					Spec: MySQLConfigSpec{
+						Database: db.Name,
+						Owner:    db.Owner,
+					},
+				}
 
-					log.Printf("reconciling loopCnt=%d obj=%#v: changing owner=%#q", reconciliationCnt, *config, db.Owner)
-					err := ops.ChangeDatabaseOwner(config.Spec.Database, config.Spec.Owner)
-					if err != nil {
-						log.Printf("reconciling loopCnt=%d obj=%#v: changing owner=%#q: error: %s", reconciliationCnt, *config, db.Owner, err)
-						continue
-					}
-					log.Printf("reconciling loopCnt=%d obj=%#v: changing owner=%#q: changed", reconciliationCnt, *config, db.Owner)
+				status, err := processDelete(obj)
+				if err != nil {
+					log.Printf("reconciling loopCnt=%d: error: processing delete obj=%#v: %s", reconciliationCnt, *obj, err)
 				} else {
-					log.Printf("reconciling loopCnt=%d obj=%#v: creating database", reconciliationCnt, *config, err)
-					err := ops.CreateDatabase(config.Spec.Database, config.Spec.Owner)
-					if err != nil {
-						log.Printf("reconciling loopCnt=%d obj=%#v: creating database: error: %s", reconciliationCnt, *config, err)
-						continue
-					}
-					log.Printf("reconciling loopCnt=%d obj=%#v: creating database: created", reconciliationCnt, *config)
+					log.Printf("reconciling loopCnt=%d: reconciled: %s obj=%#v", reconciliationCnt, status, *obj)
 				}
 			}
-
 		}
 
-		log.Printf("reconciling loopCnt=%d: reconciled", reconciliationCnt)
 		time.Sleep(reconciliationInterval)
 	}
 
 	return nil
+}
+
+func processUpdate(obj *MySQLConfig) (status string, err error) {
+	var ops *mysqlops.MySQLOps
+	{
+		ops, err = mysqlops.New(mysqlops.Config{})
+		if err != nil {
+			return "", fmt.Errorf("creating MySQLOps: %s", err)
+		}
+	}
+
+	// Reconcile MySQLConfig.
+	{
+		dbs, err := ops.ListDatabases()
+		if err != nil {
+			return "", fmt.Errorf("listing databases: %s", err)
+		}
+
+		var foundDB mysqlops.Database
+		for _, db := range dbs {
+			if db.Name == obj.Spec.Database {
+				foundDB = db
+				break
+			}
+		}
+
+		if foundDB.Name == "" {
+			err := ops.CreateDatabase(obj.Spec.Database, obj.Spec.Owner)
+			if err != nil {
+				return "", fmt.Errorf("creating database: %s", err)
+			}
+			return "database created", nil
+		}
+
+		if foundDB.Owner != obj.Spec.Owner {
+			err := ops.ChangeDatabaseOwner(obj.Spec.Database, obj.Spec.Owner)
+			if err != nil {
+				return "", fmt.Errorf("chaning owner=%#q: %s", foundDB.Owner, err)
+			}
+			return fmt.Sprintf("owner=%#q changed", foundDB.Owner), nil
+		}
+
+		return "already reconcilied", nil
+	}
+}
+
+func processDelete(obj *MySQLConfig) (status string, err error) {
+	var ops *mysqlops.MySQLOps
+	{
+		ops, err = mysqlops.New(mysqlops.Config{})
+		if err != nil {
+			return "", fmt.Errorf("creating MySQLOps: %s", err)
+		}
+	}
+
+	// Reconcile MySQLConfig.
+	{
+		dbs, err := ops.ListDatabases()
+		if err != nil {
+			return "", fmt.Errorf("listing databases: %s", err)
+		}
+
+		var foundDB mysqlops.Database
+		for _, db := range dbs {
+			if db.Name == obj.Spec.Database {
+				foundDB = db
+				break
+			}
+		}
+
+		if foundDB.Name != "" {
+			err := ops.DeleteDatabase(obj.Spec.Database)
+			if err != nil {
+				return "", fmt.Errorf("deleting database: %s", err)
+			}
+			return "database deleted", nil
+		}
+
+		return "already reconcilied", nil
+	}
 }
 
 func newHttpClient(config Config) (*http.Client, error) {
