@@ -304,6 +304,10 @@ func mainError(ctx context.Context, config Config) error {
 			}
 
 			switch event.Type {
+			// In Giant Swarm we believe that you should treat
+			// Added and Modified (or created and updated) as the
+			// same thing. Otherwise you most likely don't write
+			// a correct reconciliation.
 			case watch.Added, watch.Modified:
 				status, err := processUpdate(obj)
 				if err != nil {
