@@ -121,6 +121,7 @@ func (d *decoder) Decode() (action watch.EventType, object runtime.Object, err e
 	}
 
 	return e.Type, e.Object, nil
+
 }
 
 func (d *decoder) Close() {
@@ -269,19 +270,27 @@ func mainError(ctx context.Context, config Config) error {
 
 	// Start reconciliation loop.
 
-	var watcher watch.Interface
-	{
+	// newWatcherFunc creates a new watcher instance. It is needed as
+	// watcher's ResultChan is closed from time to time. In that case
+	// watcher is recreated in the reconciliation loop.
+	// NOTE: watcher should be stopped to release all resources associated
+	// with it.
+	newWatcherFunc := func() (watch.Interface, error) {
 		endpoint := "/apis/containerconf.de/v1/watch/mysqlconfigs"
 
 		restClient := k8sClient.Discovery().RESTClient()
 
 		stream, err := restClient.Get().AbsPath(endpoint).Stream()
 		if err != nil {
-			return fmt.Errorf("creating a stream for endpoint=%s: %s", endpoint, err)
+			return nil, fmt.Errorf("creating a stream for endpoint=%s: %s", endpoint, err)
 		}
 
-		watcher = watch.NewStreamWatcher(newDecoder(stream))
-		defer watcher.Stop()
+		return watch.NewStreamWatcher(newDecoder(stream)), nil
+	}
+
+	watcher, err := newWatcherFunc()
+	if err != nil {
+		return fmt.Errorf("creating watcher: %s", err)
 	}
 
 	reconciliationCnt := 1
@@ -291,16 +300,42 @@ func mainError(ctx context.Context, config Config) error {
 		select {
 		case <-ctx.Done():
 			log.Printf("reconciling loopCnt=%d: context cancelled", reconciliationCnt)
+			watcher.Stop()
 			return nil
-		case event := <-watcher.ResultChan():
-			obj, ok := event.Object.(*MySQLConfig)
-			if !ok {
-				return fmt.Errorf("reconciling loopCnt=%d: wrong type %T, want %T", reconciliationCnt, event.Object, &MySQLConfig{})
-			}
-			err := obj.Validate()
-			if err != nil {
-				log.Printf("reconciling loopCnt=%d: error invalid obj=%#v: %s", reconciliationCnt, *obj, err)
+		case event, more := <-watcher.ResultChan():
+			// When ResultChan is closed stop current watcher and
+			// create a new one.
+			if !more {
+				log.Printf("reconciling loopCnt=%d: recreating watcher", reconciliationCnt)
+				watcher.Stop()
+				watcher, err = newWatcherFunc()
+				if err != nil {
+					return fmt.Errorf("creating watcher: %s", err)
+				}
+				log.Printf("reconciling loopCnt=%d: recreating watcher: recreated", reconciliationCnt)
 				continue
+			}
+
+			var obj *MySQLConfig
+			{
+				if event.Object == nil {
+					obj = nil
+				} else {
+					var ok bool
+
+					obj, ok = event.Object.(*MySQLConfig)
+					if !ok {
+						// This error means bug in our
+						// code. Decoder is incopatible
+						// with the loop implemenation.
+						return fmt.Errorf("reconciling loopCnt=%d: wrong type %T, want %T", reconciliationCnt, event.Object, &MySQLConfig{})
+					}
+					err := obj.Validate()
+					if err != nil {
+						log.Printf("reconciling loopCnt=%d: error invalid obj=%#v: %s", reconciliationCnt, *obj, err)
+						continue
+					}
+				}
 			}
 
 			switch event.Type {
@@ -322,6 +357,8 @@ func mainError(ctx context.Context, config Config) error {
 				} else {
 					log.Printf("reconciling loopCnt=%d: reconciled: %s obj=%#v", reconciliationCnt, status, *obj)
 				}
+			case watch.Error:
+				log.Printf("reconciling loopCnt=%d: error: event=%#v", reconciliationCnt, event)
 			default:
 				log.Printf("reconciling loopCnt=%d: error: unknown event type=%#v, unhandled event=%#v", reconciliationCnt, event.Type, event)
 			}
