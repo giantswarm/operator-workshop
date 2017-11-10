@@ -20,13 +20,13 @@ type Config struct {
 	Port int
 }
 
-// PostgresqlOps has the database handle for connecting to the database.
-type PostgresqlOps struct {
-	PostgresqlDB *sql.DB
+// PostgreSQLOps has the database handle for connecting to the database.
+type PostgreSQLOps struct {
+	db *sql.DB
 }
 
 // New creates the connection to the database.
-func New(config Config) (*PostgresqlOps, error) {
+func New(config Config) (*PostgreSQLOps, error) {
 	// Postgres user and password are hardcoded and match the resources in postgres.yaml.
 	psqlInfo := fmt.Sprintf("host=%s port=%d user=%s password=%s sslmode=disable", config.Host, config.Port, "postgres", "operator-workshop")
 
@@ -35,15 +35,15 @@ func New(config Config) (*PostgresqlOps, error) {
 		return nil, fmt.Errorf("creating postgres client: %s", err)
 	}
 
-	postgresqlOps := &PostgresqlOps{
-		PostgresqlDB: db,
+	postgreSQLOps := &PostgreSQLOps{
+		db: db,
 	}
 
-	return postgresqlOps, nil
+	return postgreSQLOps, nil
 }
 
 // CreateDatabase creates a database and owner if they don't exist.
-func (p *PostgresqlOps) CreateDatabase(name, owner string) error {
+func (p *PostgreSQLOps) CreateDatabase(name, owner string) error {
 	ownerExists, err := p.hasUser(owner)
 	if err != nil {
 		return fmt.Errorf("checking owner exists: %s", err)
@@ -58,7 +58,7 @@ func (p *PostgresqlOps) CreateDatabase(name, owner string) error {
 	}
 	if !dbExists {
 		createDb := fmt.Sprintf("CREATE DATABASE \"%s\"", name)
-		_, err := p.PostgresqlDB.Exec(createDb)
+		_, err := p.db.Exec(createDb)
 		if err != nil {
 			return fmt.Errorf("creating database: %s", err)
 		}
@@ -69,7 +69,7 @@ func (p *PostgresqlOps) CreateDatabase(name, owner string) error {
 
 // ChangeDatabaseOwner changes the database owner and creates the user if it
 // doesn't exist.
-func (p *PostgresqlOps) ChangeDatabaseOwner(name, owner string) error {
+func (p *PostgreSQLOps) ChangeDatabaseOwner(name, owner string) error {
 	ownerExists, err := p.hasUser(owner)
 	if err != nil {
 		return fmt.Errorf("checking owner exists: %s", err)
@@ -79,7 +79,7 @@ func (p *PostgresqlOps) ChangeDatabaseOwner(name, owner string) error {
 	}
 
 	changeOwner := fmt.Sprintf("ALTER DATABASE \"%s\" OWNER TO \"%s\"", name, owner)
-	_, err = p.PostgresqlDB.Exec(changeOwner)
+	_, err = p.db.Exec(changeOwner)
 	if err != nil {
 		return fmt.Errorf("changing owner: %s", err)
 	}
@@ -88,7 +88,7 @@ func (p *PostgresqlOps) ChangeDatabaseOwner(name, owner string) error {
 }
 
 // DeleteDatabase deletes a database if it exists.
-func (p *PostgresqlOps) DeleteDatabase(name string) error {
+func (p *PostgreSQLOps) DeleteDatabase(name string) error {
 	dbExists, err := p.hasDatabase(name)
 	if err != nil {
 		return fmt.Errorf("checing database exists: %s", err)
@@ -96,7 +96,7 @@ func (p *PostgresqlOps) DeleteDatabase(name string) error {
 
 	if dbExists {
 		deleteDb := fmt.Sprintf("DROP DATABASE \"%s\"", name)
-		_, err := p.PostgresqlDB.Exec(deleteDb)
+		_, err := p.db.Exec(deleteDb)
 		if err != nil {
 			return fmt.Errorf("deleting database: %s", err)
 		}
@@ -106,10 +106,10 @@ func (p *PostgresqlOps) DeleteDatabase(name string) error {
 }
 
 // ListDatabases lists the databases.
-func (p *PostgresqlOps) ListDatabases() ([]Database, error) {
+func (p *PostgreSQLOps) ListDatabases() ([]Database, error) {
 	dbs := []Database{}
 
-	rows, err := p.PostgresqlDB.Query("SELECT pg_database.datname, pg_user.usename FROM pg_database, pg_user WHERE pg_database.datdba = pg_user.usesysid")
+	rows, err := p.db.Query("SELECT pg_database.datname, pg_user.usename FROM pg_database, pg_user WHERE pg_database.datdba = pg_user.usesysid")
 	if err != nil {
 		return []Database{}, fmt.Errorf("listing databases: %s", err)
 	}
@@ -130,7 +130,7 @@ func (p *PostgresqlOps) ListDatabases() ([]Database, error) {
 	return dbs, nil
 }
 
-func (p *PostgresqlOps) hasDatabase(name string) (bool, error) {
+func (p *PostgreSQLOps) hasDatabase(name string) (bool, error) {
 	dbs, err := p.ListDatabases()
 	if err != nil {
 		return false, fmt.Errorf("checking database exists: %s", err)
@@ -145,9 +145,9 @@ func (p *PostgresqlOps) hasDatabase(name string) (bool, error) {
 	return false, nil
 }
 
-func (p *PostgresqlOps) createUser(user string) error {
+func (p *PostgreSQLOps) createUser(user string) error {
 	createUser := fmt.Sprintf("CREATE USER \"%s\" WITH CREATEDB", user)
-	_, err := p.PostgresqlDB.Exec(createUser)
+	_, err := p.db.Exec(createUser)
 	if err != nil {
 		return fmt.Errorf("creating user: %s", err)
 	}
@@ -155,8 +155,8 @@ func (p *PostgresqlOps) createUser(user string) error {
 	return nil
 }
 
-func (p *PostgresqlOps) hasUser(name string) (bool, error) {
-	rows, err := p.PostgresqlDB.Query("SELECT pg_user.usename FROM pg_user")
+func (p *PostgreSQLOps) hasUser(name string) (bool, error) {
+	rows, err := p.db.Query("SELECT pg_user.usename FROM pg_user")
 	if err != nil {
 		return false, fmt.Errorf("listing users: %s", err)
 	}
