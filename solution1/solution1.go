@@ -1,4 +1,4 @@
-package main
+package solution1
 
 import (
 	"bytes"
@@ -6,34 +6,16 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
-	"os"
-	"os/exec"
-	"os/signal"
-	"os/user"
-	"path"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/giantswarm/operator-workshop/postgresqlops"
 )
-
-const (
-	dbServiceDefault  = "workshop-postgresql"
-	dbUserDefault     = "postgres"
-	dbPasswordDefault = "operator-workshop"
-)
-
-func init() {
-	log.SetFlags(log.Ldate | log.Ltime | log.LUTC)
-	log.SetPrefix("I ")
-}
 
 type Config struct {
 	DBHost     string
@@ -41,150 +23,18 @@ type Config struct {
 	DBUser     string
 	DBPassword string
 
-	K8sServer  string
-	K8sCrtFile string
-	K8sKeyFile string
-	K8sCAFile  string
+	K8sInCluster bool
+	K8sServer    string
+	K8sCrtFile   string
+	K8sKeyFile   string
+	K8sCAFile    string
 }
 
-// PostgreSQLConfig is custom object of postgresqlconfigs.containerconf.de custom
-// resource.
-type PostgreSQLConfig struct {
-	Spec PostgreSQLConfigSpec `json:"spec"`
-}
-
-func (m PostgreSQLConfig) Validate() error {
-	if err := m.Spec.Validate(); err != nil {
-		return fmt.Errorf("spec is not valid: %s", err)
-	}
-	return nil
-}
-
-// PostgreSQLConfigSpec is custom object specification. Represents the desired state
-// towards which the operator reconciles. It also includes information
-// necessary to perform the reconciliation, i.e. database access information.
-type PostgreSQLConfigSpec struct {
-	// Database is database name to be created.
-	Database string `json:"database"`
-	// Owner is the database owner.
-	Owner string `json:"owner"`
-}
-
-func (s PostgreSQLConfigSpec) Validate() error {
-	if s.Database == "" {
-		return fmt.Errorf("database is not set")
-	}
-	if s.Owner == "" {
-		return fmt.Errorf("owner is not set")
-	}
-	return nil
-}
-
-// PostgreSQLConfigList represents a list of custom objects. It is useful for
-// decoding list API calls.
-type PostgreSQLConfigList struct {
-	Items []*PostgreSQLConfig `json:"items"`
-}
-
-func main() {
-	ctx := context.Background()
-
-	config := parseFlags()
-
-	mainExitCodeCh := make(chan int)
-	mainCtx, mainCancelFunc := context.WithCancel(ctx)
-
-	// Run actual code.
-	go func() {
-		err := mainError(mainCtx, config)
-		if err != nil {
-			log.SetPrefix("E ")
-			log.Printf("%s", err)
-			mainExitCodeCh <- 1
-		}
-		mainExitCodeCh <- 0
-	}()
-
-	sigCh := make(chan os.Signal, 2)
-	signal.Notify(sigCh, os.Interrupt, os.Kill)
-
-	// Handle graceful stop.
-	gracefulStop := false
-	for {
-		select {
-		case code := <-mainExitCodeCh:
-			log.Printf("exiting: code=%d", code)
-			os.Exit(code)
-		case sig := <-sigCh:
-			// On second SIGKILL exit immediately.
-			if sig == os.Kill && gracefulStop {
-				log.Printf("exiting: forced exit code=1")
-				os.Exit(1)
-			}
-			if !gracefulStop {
-				log.Printf("exiting: trying to preform graceful stop")
-				gracefulStop = true
-				mainCancelFunc()
-			}
-		}
-	}
-}
-
-func parseFlags() Config {
-	var config Config
-
-	var homeDir string
-	{
-		u, err := user.Current()
-		if err != nil {
-			homeDir = os.Getenv("HOME")
-		} else {
-			homeDir = u.HomeDir
-		}
-
+func Run(ctx context.Context, config Config) error {
+	if config.K8sInCluster {
+		return fmt.Errorf("incluster mode is not supported in solution1")
 	}
 
-	var minikubeIP string
-	{
-		out, err := exec.Command("minikube", "ip").Output()
-		if err == nil {
-			minikubeIP = strings.TrimSpace(string(out))
-		}
-	}
-
-	var serverDefault string
-	{
-		if minikubeIP != "" {
-			serverDefault = "https://" + string(minikubeIP) + ":8443"
-		}
-	}
-
-	var dbPortDefault int
-	{
-		out, err := exec.Command("minikube", "service", dbServiceDefault, "--format", "{{.Port}}").Output()
-		if err == nil {
-			s := strings.TrimSpace(string(out))
-			dbPortDefault, err = strconv.Atoi(s)
-			if err != nil {
-				dbPortDefault = 0
-			}
-		}
-	}
-
-	flag.StringVar(&config.DBHost, "postgresql.host", minikubeIP, "PostgreSQL server host.")
-	flag.IntVar(&config.DBPort, "postgresql.port", dbPortDefault, "PostgreSQL server port.")
-	flag.StringVar(&config.DBUser, "postgresql.user", dbUserDefault, "PostgreSQL user.")
-	flag.StringVar(&config.DBPassword, "postgresql.password", dbPasswordDefault, "PostgreSQL password.")
-	flag.StringVar(&config.K8sServer, "kubernetes.server", serverDefault, "Kubernetes API server address.")
-	flag.StringVar(&config.K8sCrtFile, "kubernetes.crt", path.Join(homeDir, ".minikube/apiserver.crt"), "Kubernetes certificate file path.")
-	flag.StringVar(&config.K8sKeyFile, "kubernetes.key", path.Join(homeDir, ".minikube/apiserver.key"), "Kubernetes key file path.")
-	flag.StringVar(&config.K8sCAFile, "kubernetes.ca", path.Join(homeDir, ".minikube/ca.crt"), "Kubernetes CA file path.")
-	flag.Parse()
-
-	return config
-}
-
-func mainError(ctx context.Context, config Config) error {
 	k8sClient, err := newHttpClient(config)
 	if err != nil {
 		return fmt.Errorf("creating K8s client: %s", err)
@@ -301,27 +151,26 @@ func mainError(ctx context.Context, config Config) error {
 	// current custom objects and reconciles towards the state described in
 	// them. The loop is inifinite, can be cancelled with cancelling the
 	// context.
-	reconciliationCnt := 1
-	reconciliationInterval := time.Second * 1
-	for ; ; reconciliationCnt++ {
-		log.Printf("reconciling loopCnt=%d", reconciliationCnt)
+	reconciliationInterval := time.Second * 2
+	for {
+		log.Printf("reconciling")
 
 		if ctx.Err() == context.Canceled {
-			log.Printf("reconciling loopCnt=%d: context cancelled", reconciliationCnt)
+			log.Printf("reconciling: context cancelled")
 			return nil
 		}
 
 		url := config.K8sServer + "/apis/containerconf.de/v1/postgresqlconfigs"
 		res, err := k8sClient.Get(url)
 		if err != nil {
-			return fmt.Errorf("reconciling loopCnt=%d: %s url=%s", reconciliationCnt, err, url)
+			return fmt.Errorf("reconciling: requesting url=%#q: %s", url, err)
 		}
 
 		body := readerToBytesTrimSpace(res.Body)
 		res.Body.Close()
 
 		if res.StatusCode != http.StatusOK {
-			log.Printf("reconciling loopCnt=%d: error client response status status=%d body=%#q", reconciliationCnt, res.StatusCode, body)
+			log.Printf("reconciling: error client response status status=%d body=%#q", res.StatusCode, body)
 			time.Sleep(reconciliationInterval)
 			continue
 		}
@@ -329,7 +178,7 @@ func mainError(ctx context.Context, config Config) error {
 		var configs PostgreSQLConfigList
 		err = json.Unmarshal(body, &configs)
 		if err != nil {
-			log.Printf("reconciling loopCnt=%d: error unmarshalling postgresqlconfigs list: %s body=%#q", reconciliationCnt, err, body)
+			log.Printf("reconciling: error unmarshalling postgresqlconfigs list: %s body=%#q", err, body)
 			time.Sleep(reconciliationInterval)
 			continue
 		}
@@ -338,7 +187,7 @@ func mainError(ctx context.Context, config Config) error {
 		// optimised but it isn't really an issue.
 		dbs, err := ops.ListDatabases()
 		if err != nil {
-			log.Printf("reconciling loopCnt=%d: error listing databases: %s", reconciliationCnt, err)
+			log.Printf("reconciling: error listing databases: %s", err)
 			time.Sleep(reconciliationInterval)
 			continue
 		}
@@ -350,8 +199,7 @@ func mainError(ctx context.Context, config Config) error {
 		for _, obj := range configs.Items {
 			err := obj.Validate()
 			if err != nil {
-				log.Printf("reconciling loopCnt=%d: error invalid object: %s obj=%#v", reconciliationCnt, err, *obj)
-				time.Sleep(reconciliationInterval)
+				log.Printf("reconciling: error invalid object: %s obj=%#v", err, *obj)
 				continue
 			}
 
@@ -359,9 +207,9 @@ func mainError(ctx context.Context, config Config) error {
 
 			status, err := processUpdate(ops, obj)
 			if err != nil {
-				log.Printf("reconciling loopCnt=%d: error: processing update obj=%#v: %s", reconciliationCnt, *obj, err)
+				log.Printf("reconciling: error: processing update obj=%#v: %s", *obj, err)
 			} else {
-				log.Printf("reconciling loopCnt=%d: reconciled: %s obj=%#v", reconciliationCnt, status, *obj)
+				log.Printf("reconciling: reconciled: %s obj=%#v", status, *obj)
 			}
 		}
 
@@ -382,7 +230,6 @@ func mainError(ctx context.Context, config Config) error {
 				}
 
 				if processed {
-					time.Sleep(reconciliationInterval)
 					continue
 				}
 
@@ -395,9 +242,9 @@ func mainError(ctx context.Context, config Config) error {
 
 				status, err := processDelete(ops, obj)
 				if err != nil {
-					log.Printf("reconciling loopCnt=%d: error: processing delete obj=%#v: %s", reconciliationCnt, *obj, err)
+					log.Printf("reconciling: error: processing delete obj=%#v: %s", *obj, err)
 				} else {
-					log.Printf("reconciling loopCnt=%d: reconciled: %s obj=%#v", reconciliationCnt, status, *obj)
+					log.Printf("reconciling: reconciled: %s obj=%#v", status, *obj)
 				}
 			}
 		}
@@ -436,7 +283,7 @@ func processUpdate(ops *postgresqlops.PostgreSQLOps, obj *PostgreSQLConfig) (sta
 		return fmt.Sprintf("owner=%#q changed", foundDB.Owner), nil
 	}
 
-	return "already reconcilied", nil
+	return "already created", nil
 }
 
 func processDelete(ops *postgresqlops.PostgreSQLOps, obj *PostgreSQLConfig) (status string, err error) {
