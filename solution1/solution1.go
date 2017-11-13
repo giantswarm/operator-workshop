@@ -17,10 +17,17 @@ import (
 	"os/signal"
 	"os/user"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/giantswarm/operator-workshop/mysqlops"
+	"github.com/giantswarm/operator-workshop/postgresqlops"
+)
+
+const (
+	dbServiceDefault  = "workshop-postgresql"
+	dbUserDefault     = "postgres"
+	dbPasswordDefault = "operator-workshop"
 )
 
 func init() {
@@ -29,36 +36,41 @@ func init() {
 }
 
 type Config struct {
+	DBHost     string
+	DBPort     int
+	DBUser     string
+	DBPassword string
+
 	K8sServer  string
 	K8sCrtFile string
 	K8sKeyFile string
 	K8sCAFile  string
 }
 
-// MySQLConfig is custom object of mysqlconfigs.containerconf.de custom
+// PostgreSQLConfig is custom object of postgresqlconfigs.containerconf.de custom
 // resource.
-type MySQLConfig struct {
-	Spec MySQLConfigSpec `json:"spec"`
+type PostgreSQLConfig struct {
+	Spec PostgreSQLConfigSpec `json:"spec"`
 }
 
-func (m MySQLConfig) Validate() error {
+func (m PostgreSQLConfig) Validate() error {
 	if err := m.Spec.Validate(); err != nil {
 		return fmt.Errorf("spec is not valid: %s", err)
 	}
 	return nil
 }
 
-// MySQLConfigSpec is custom object specification. Represents the desired state
+// PostgreSQLConfigSpec is custom object specification. Represents the desired state
 // towards which the operator reconciles. It also includes information
 // necessary to perform the reconciliation, i.e. database access information.
-type MySQLConfigSpec struct {
+type PostgreSQLConfigSpec struct {
 	// Database is database name to be created.
 	Database string `json:"database"`
 	// Owner is the database owner.
 	Owner string `json:"owner"`
 }
 
-func (s MySQLConfigSpec) Validate() error {
+func (s PostgreSQLConfigSpec) Validate() error {
 	if s.Database == "" {
 		return fmt.Errorf("database is not set")
 	}
@@ -68,10 +80,10 @@ func (s MySQLConfigSpec) Validate() error {
 	return nil
 }
 
-// MySQLConfigList represents a list of custom objects. It is useful for
+// PostgreSQLConfigList represents a list of custom objects. It is useful for
 // decoding list API calls.
-type MySQLConfigList struct {
-	Items []*MySQLConfig `json:"items"`
+type PostgreSQLConfigList struct {
+	Items []*PostgreSQLConfig `json:"items"`
 }
 
 func main() {
@@ -132,15 +144,37 @@ func parseFlags() Config {
 
 	}
 
-	var serverDefault string
+	var minikubeIP string
 	{
 		out, err := exec.Command("minikube", "ip").Output()
 		if err == nil {
-			minikubeIP := strings.TrimSpace(string(out))
+			minikubeIP = strings.TrimSpace(string(out))
+		}
+	}
+
+	var serverDefault string
+	{
+		if minikubeIP != "" {
 			serverDefault = "https://" + string(minikubeIP) + ":8443"
 		}
 	}
 
+	var dbPortDefault int
+	{
+		out, err := exec.Command("minikube", "service", dbServiceDefault, "--format", "{{.Port}}").Output()
+		if err == nil {
+			s := strings.TrimSpace(string(out))
+			dbPortDefault, err = strconv.Atoi(s)
+			if err != nil {
+				dbPortDefault = 0
+			}
+		}
+	}
+
+	flag.StringVar(&config.DBHost, "postgresql.host", minikubeIP, "PostgreSQL server host.")
+	flag.IntVar(&config.DBPort, "postgresql.port", dbPortDefault, "PostgreSQL server port.")
+	flag.StringVar(&config.DBUser, "postgresql.user", dbUserDefault, "PostgreSQL user.")
+	flag.StringVar(&config.DBPassword, "postgresql.password", dbPasswordDefault, "PostgreSQL password.")
 	flag.StringVar(&config.K8sServer, "kubernetes.server", serverDefault, "Kubernetes API server address.")
 	flag.StringVar(&config.K8sCrtFile, "kubernetes.crt", path.Join(homeDir, ".minikube/apiserver.crt"), "Kubernetes certificate file path.")
 	flag.StringVar(&config.K8sKeyFile, "kubernetes.key", path.Join(homeDir, ".minikube/apiserver.key"), "Kubernetes key file path.")
@@ -165,16 +199,16 @@ func mainError(ctx context.Context, config Config) error {
 			"apiVersion": "apiextensions.k8s.io/v1beta1",
 			"kind": "CustomResourceDefinition",
 			"metadata": {
-				"name": "mysqlconfigs.containerconf.de"
+				"name": "postgresqlconfigs.containerconf.de"
 			},
 			"spec": {
 				"group": "containerconf.de",
 				"version": "v1",
 				"scope": "Namespaced",
 				"names": {
-					"plural": "mysqlconfigs",
-					"singular": "mysqlconfig",
-					"kind": "MySQLConfig",
+					"plural": "postgresqlconfigs",
+					"singular": "postgresqlconfig",
+					"kind": "PostgreSQLConfig",
 					"shortNames": []
 				}
 			}
@@ -245,6 +279,24 @@ func mainError(ctx context.Context, config Config) error {
 		}
 	}
 
+	// Create PostgreSQLOps.
+	var ops *postgresqlops.PostgreSQLOps
+	{
+		config := postgresqlops.Config{
+			Host:     config.DBHost,
+			Port:     config.DBPort,
+			User:     config.DBUser,
+			Password: config.DBPassword,
+		}
+
+		ops, err = postgresqlops.New(config)
+		if err != nil {
+			return fmt.Errorf("creating PostgreSQLOps: %s", err)
+		}
+
+		defer ops.Close()
+	}
+
 	// Start reconciliation loop. In every iteration the operator lists
 	// current custom objects and reconciles towards the state described in
 	// them. The loop is inifinite, can be cancelled with cancelling the
@@ -259,7 +311,7 @@ func mainError(ctx context.Context, config Config) error {
 			return nil
 		}
 
-		url := config.K8sServer + "/apis/containerconf.de/v1/mysqlconfigs"
+		url := config.K8sServer + "/apis/containerconf.de/v1/postgresqlconfigs"
 		res, err := k8sClient.Get(url)
 		if err != nil {
 			return fmt.Errorf("reconciling loopCnt=%d: %s url=%s", reconciliationCnt, err, url)
@@ -270,46 +322,42 @@ func mainError(ctx context.Context, config Config) error {
 
 		if res.StatusCode != http.StatusOK {
 			log.Printf("reconciling loopCnt=%d: error client response status status=%d body=%#q", reconciliationCnt, res.StatusCode, body)
+			time.Sleep(reconciliationInterval)
 			continue
 		}
 
-		var configs MySQLConfigList
+		var configs PostgreSQLConfigList
 		err = json.Unmarshal(body, &configs)
 		if err != nil {
-			log.Printf("reconciling loopCnt=%d: error unmarshalling mysqlconfigs list: %s body=%#q", reconciliationCnt, err, body)
+			log.Printf("reconciling loopCnt=%d: error unmarshalling postgresqlconfigs list: %s body=%#q", reconciliationCnt, err, body)
+			time.Sleep(reconciliationInterval)
 			continue
 		}
 
-		var ops *mysqlops.MySQLOps
-		{
-			ops, err = mysqlops.New(mysqlops.Config{})
-			if err != nil {
-				log.Printf("reconciling loopCnt=%d: error creating MySQLOps: %s", reconciliationCnt, err)
-				continue
-			}
-		}
 		// Many DB operations are repeated. This can be
 		// optimised but it isn't really an issue.
 		dbs, err := ops.ListDatabases()
 		if err != nil {
 			log.Printf("reconciling loopCnt=%d: error listing databases: %s", reconciliationCnt, err)
+			time.Sleep(reconciliationInterval)
 			continue
 		}
 
 		// Reconcile updates and memorise valid objects. They will be
 		// used later during deletion.
-		var validObjs []*MySQLConfig
+		var validObjs []*PostgreSQLConfig
 
 		for _, obj := range configs.Items {
 			err := obj.Validate()
 			if err != nil {
 				log.Printf("reconciling loopCnt=%d: error invalid object: %s obj=%#v", reconciliationCnt, err, *obj)
+				time.Sleep(reconciliationInterval)
 				continue
 			}
 
 			validObjs = append(validObjs, obj)
 
-			status, err := processUpdate(obj)
+			status, err := processUpdate(ops, obj)
 			if err != nil {
 				log.Printf("reconciling loopCnt=%d: error: processing update obj=%#v: %s", reconciliationCnt, *obj, err)
 			} else {
@@ -334,17 +382,18 @@ func mainError(ctx context.Context, config Config) error {
 				}
 
 				if processed {
+					time.Sleep(reconciliationInterval)
 					continue
 				}
 
-				obj := &MySQLConfig{
-					Spec: MySQLConfigSpec{
+				obj := &PostgreSQLConfig{
+					Spec: PostgreSQLConfigSpec{
 						Database: db.Name,
 						Owner:    db.Owner,
 					},
 				}
 
-				status, err := processDelete(obj)
+				status, err := processDelete(ops, obj)
 				if err != nil {
 					log.Printf("reconciling loopCnt=%d: error: processing delete obj=%#v: %s", reconciliationCnt, *obj, err)
 				} else {
@@ -357,84 +406,62 @@ func mainError(ctx context.Context, config Config) error {
 	}
 }
 
-func processUpdate(obj *MySQLConfig) (status string, err error) {
-	var ops *mysqlops.MySQLOps
-	{
-		ops, err = mysqlops.New(mysqlops.Config{})
-		if err != nil {
-			return "", fmt.Errorf("creating MySQLOps: %s", err)
+func processUpdate(ops *postgresqlops.PostgreSQLOps, obj *PostgreSQLConfig) (status string, err error) {
+	dbs, err := ops.ListDatabases()
+	if err != nil {
+		return "", fmt.Errorf("listing databases: %s", err)
+	}
+
+	var foundDB postgresqlops.Database
+	for _, db := range dbs {
+		if db.Name == obj.Spec.Database {
+			foundDB = db
+			break
 		}
 	}
 
-	// Reconcile MySQLConfig.
-	{
-		dbs, err := ops.ListDatabases()
+	if foundDB.Name == "" {
+		err := ops.CreateDatabase(obj.Spec.Database, obj.Spec.Owner)
 		if err != nil {
-			return "", fmt.Errorf("listing databases: %s", err)
+			return "", fmt.Errorf("creating database: %s", err)
 		}
-
-		var foundDB mysqlops.Database
-		for _, db := range dbs {
-			if db.Name == obj.Spec.Database {
-				foundDB = db
-				break
-			}
-		}
-
-		if foundDB.Name == "" {
-			err := ops.CreateDatabase(obj.Spec.Database, obj.Spec.Owner)
-			if err != nil {
-				return "", fmt.Errorf("creating database: %s", err)
-			}
-			return "database created", nil
-		}
-
-		if foundDB.Owner != obj.Spec.Owner {
-			err := ops.ChangeDatabaseOwner(obj.Spec.Database, obj.Spec.Owner)
-			if err != nil {
-				return "", fmt.Errorf("chaning owner=%#q: %s", foundDB.Owner, err)
-			}
-			return fmt.Sprintf("owner=%#q changed", foundDB.Owner), nil
-		}
-
-		return "already reconcilied", nil
+		return "database created", nil
 	}
+
+	if foundDB.Owner != obj.Spec.Owner {
+		err := ops.ChangeDatabaseOwner(obj.Spec.Database, obj.Spec.Owner)
+		if err != nil {
+			return "", fmt.Errorf("chaning owner=%#q: %s", foundDB.Owner, err)
+		}
+		return fmt.Sprintf("owner=%#q changed", foundDB.Owner), nil
+	}
+
+	return "already reconcilied", nil
 }
 
-func processDelete(obj *MySQLConfig) (status string, err error) {
-	var ops *mysqlops.MySQLOps
-	{
-		ops, err = mysqlops.New(mysqlops.Config{})
-		if err != nil {
-			return "", fmt.Errorf("creating MySQLOps: %s", err)
+func processDelete(ops *postgresqlops.PostgreSQLOps, obj *PostgreSQLConfig) (status string, err error) {
+	dbs, err := ops.ListDatabases()
+	if err != nil {
+		return "", fmt.Errorf("listing databases: %s", err)
+	}
+
+	var found bool
+	for _, db := range dbs {
+		if db.Name == obj.Spec.Database {
+			found = true
+			break
 		}
 	}
 
-	// Reconcile MySQLConfig.
-	{
-		dbs, err := ops.ListDatabases()
+	if found {
+		err := ops.DeleteDatabase(obj.Spec.Database)
 		if err != nil {
-			return "", fmt.Errorf("listing databases: %s", err)
+			return "", fmt.Errorf("deleting database: %s", err)
 		}
-
-		var foundDB mysqlops.Database
-		for _, db := range dbs {
-			if db.Name == obj.Spec.Database {
-				foundDB = db
-				break
-			}
-		}
-
-		if foundDB.Name != "" {
-			err := ops.DeleteDatabase(obj.Spec.Database)
-			if err != nil {
-				return "", fmt.Errorf("deleting database: %s", err)
-			}
-			return "database deleted", nil
-		}
-
-		return "already reconcilied", nil
+		return "database deleted", nil
 	}
+
+	return "already reconcilied", nil
 }
 
 func newHttpClient(config Config) (*http.Client, error) {
