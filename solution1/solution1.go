@@ -355,8 +355,6 @@ func mainError(ctx context.Context, config Config) error {
 
 		time.Sleep(reconciliationInterval)
 	}
-
-	return nil
 }
 
 func processUpdate(obj *MySQLConfig) (status string, err error) {
