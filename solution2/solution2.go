@@ -2,17 +2,18 @@ package solution2
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"time"
 
 	"github.com/giantswarm/operator-workshop/customobject"
 	"github.com/giantswarm/operator-workshop/postgresqlops"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
 
 	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
 	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
@@ -48,46 +49,17 @@ type PostgreSQLConfigList struct {
 	apismetav1.TypeMeta `json:",inline"`
 	apismetav1.ListMeta `json:"metadata,omitempty"`
 
-	customobject.PostgreSQLConfigList `json:",inline"`
-}
-
-// decoder decodes custom objects from a stream. It is used for decoding list
-// of objects by client-go watcher.
-type decoder struct {
-	stream  io.ReadCloser
-	jsonDec *json.Decoder
-}
-
-func newDecoder(stream io.ReadCloser) *decoder {
-	return &decoder{
-		stream:  stream,
-		jsonDec: json.NewDecoder(stream),
-	}
-}
-
-func (d *decoder) Decode() (action watch.EventType, object runtime.Object, err error) {
-	var e struct {
-		Type   watch.EventType
-		Object *PostgreSQLConfig
-	}
-	e.Object = new(PostgreSQLConfig)
-
-	if err := d.jsonDec.Decode(&e); err != nil {
-		return watch.Error, nil, err
-	}
-
-	return e.Type, e.Object, nil
-
-}
-
-func (d *decoder) Close() {
-	d.stream.Close()
+	Items []*PostgreSQLConfig `json:"items"`
 }
 
 func Run(ctx context.Context, config Config) error {
 	k8sClient, err := newK8sExtClient(config)
 	if err != nil {
 		return fmt.Errorf("creating K8s client: %s", err)
+	}
+	k8sCustomRestClient, err := newK8sCustomRestClient(config, "containerconf.de", "v1")
+	if err != nil {
+		return fmt.Errorf("creating K8s custom REST client: %s", err)
 	}
 
 	// Create Custom Resource Definition.
@@ -172,113 +144,128 @@ func Run(ctx context.Context, config Config) error {
 		resource = customobject.NewResource(ops)
 	}
 
+	// Create reconciliation events handler functions.
+
+	onUpdateFunc := func(obj interface{}) {
+		postgreSQLConfig, ok := obj.(*PostgreSQLConfig)
+		if !ok {
+			log.Printf("reconciling: wrong type %T, want %T", obj, postgreSQLConfig)
+		}
+		err := postgreSQLConfig.Validate()
+		if err != nil {
+			log.Printf("reconciling: error invalid obj=%#v: %s", postgreSQLConfig.PostgreSQLConfig, err)
+		}
+
+		status, err := resource.EnsureCreated(&postgreSQLConfig.PostgreSQLConfig)
+		if err != nil {
+			log.Printf("reconciling: error: processing update obj=%#v: %s", postgreSQLConfig.PostgreSQLConfig, err)
+		} else {
+			log.Printf("reconciling: reconciled: %s obj=%#v", status, postgreSQLConfig.PostgreSQLConfig)
+		}
+	}
+
+	onDeleteFunc := func(obj interface{}) {
+		postgreSQLConfig, ok := obj.(*PostgreSQLConfig)
+		if !ok {
+			log.Printf("reconciling: wrong type %T, want %T", obj, postgreSQLConfig)
+		}
+		err := postgreSQLConfig.Validate()
+		if err != nil {
+			log.Printf("reconciling: error invalid obj=%#v: %s", postgreSQLConfig.PostgreSQLConfig, err)
+		}
+
+		status, err := resource.EnsureDeleted(&postgreSQLConfig.PostgreSQLConfig)
+		if err != nil {
+			log.Printf("reconciling: error: processing delete obj=%#v: %s", postgreSQLConfig.PostgreSQLConfig, err)
+		} else {
+			log.Printf("reconciling: reconciled: %s obj=%#v", status, postgreSQLConfig.PostgreSQLConfig)
+		}
+	}
+
 	// Start reconciliation loop.
 
-	// newWatcherFunc creates a new watcher instance. It is needed as
-	// watcher's ResultChan is closed from time to time. In that case
-	// watcher is recreated in the reconciliation loop.
-	// NOTE: watcher should be stopped to release all resources associated
-	// with it.
-	newWatcherFunc := func() (watch.Interface, error) {
-		endpoint := "/apis/containerconf.de/v1/watch/postgresqlconfigs"
-
-		restClient := k8sClient.Discovery().RESTClient()
-
-		stream, err := restClient.Get().AbsPath(endpoint).Stream()
-		if err != nil {
-			return nil, fmt.Errorf("creating a stream for endpoint=%s: %s", endpoint, err)
-		}
-
-		return watch.NewStreamWatcher(newDecoder(stream)), nil
+	// In Giant Swarm we believe that you should treat Added and Updated as
+	// the same thing. Otherwise you most likely don't write a correct
+	// reconciliation.
+	handler := cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(obj interface{}) { onUpdateFunc(obj) },
+		UpdateFunc: func(oldObj, newObj interface{}) { onUpdateFunc(newObj) },
+		DeleteFunc: func(obj interface{}) { onDeleteFunc(obj) },
 	}
 
-	watcher, err := newWatcherFunc()
-	if err != nil {
-		return fmt.Errorf("creating watcher: %s", err)
-	}
+	listWatch := cache.NewListWatchFromClient(k8sCustomRestClient, "postgresqlconfigs", "", fields.Everything())
 
-	for {
-		log.Printf("reconciling")
+	_, controller := cache.NewInformer(listWatch, &PostgreSQLConfig{}, time.Second*15, handler)
 
-		select {
-		case <-ctx.Done():
-			log.Printf("reconciling: context cancelled")
-			watcher.Stop()
-			return nil
-		case event, more := <-watcher.ResultChan():
-			// When ResultChan is closed stop current watcher and
-			// create a new one.
-			if !more {
-				log.Printf("reconciling: recreating watcher")
-				watcher.Stop()
-				watcher, err = newWatcherFunc()
-				if err != nil {
-					return fmt.Errorf("creating watcher: %s", err)
-				}
-				log.Printf("reconciling: recreating watcher: recreated")
-				continue
-			}
+	controller.Run(ctx.Done())
 
-			var obj *PostgreSQLConfig
-			{
-				if event.Object == nil {
-					obj = nil
-				} else {
-					var ok bool
-
-					obj, ok = event.Object.(*PostgreSQLConfig)
-					if !ok {
-						// This error means bug in our
-						// code. Decoder is incopatible
-						// with the loop implemenation.
-						return fmt.Errorf("reconciling: wrong type %T, want %T", event.Object, &PostgreSQLConfig{})
-					}
-					err := obj.Validate()
-					if err != nil {
-						log.Printf("reconciling: error invalid obj=%#v: %s", obj.PostgreSQLConfig, err)
-						continue
-					}
-				}
-			}
-
-			switch event.Type {
-			// In Giant Swarm we believe that you should treat
-			// Added and Modified (or created and updated) as the
-			// same thing. Otherwise you most likely don't write
-			// a correct reconciliation.
-			case watch.Added, watch.Modified:
-				status, err := resource.EnsureCreated(&obj.PostgreSQLConfig)
-				if err != nil {
-					log.Printf("reconciling: error: processing update obj=%#v: %s", obj.PostgreSQLConfig, err)
-				} else {
-					log.Printf("reconciling: reconciled: %s obj=%#v", status, obj.PostgreSQLConfig)
-				}
-			case watch.Deleted:
-				status, err := resource.EnsureDeleted(&obj.PostgreSQLConfig)
-				if err != nil {
-					log.Printf("reconciling: error: processing delete obj=%#v: %s", obj.PostgreSQLConfig, err)
-				} else {
-					log.Printf("reconciling: reconciled: %s obj=%#v", status, obj.PostgreSQLConfig)
-				}
-			case watch.Error:
-				log.Printf("reconciling: error: event=%#v", event)
-			default:
-				log.Printf("reconciling: error: unknown event type=%#v, unhandled event=%#v", event.Type, event)
-			}
-		}
-	}
+	return nil
 }
 
 // newK8sExtClient creates Kubernets extensions API client.
 func newK8sExtClient(config Config) (apiextensionsclient.Interface, error) {
-	restConfig := &rest.Config{
-		Host: config.K8sServer,
-		TLSClientConfig: rest.TLSClientConfig{
-			CertFile: config.K8sCrtFile,
-			KeyFile:  config.K8sKeyFile,
-			CAFile:   config.K8sCAFile,
-		},
+	restConfig, err := newBaseRestConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("creating REST config: %s", err)
 	}
 
 	return apiextensionsclient.NewForConfig(restConfig)
+}
+
+func newK8sCustomRestClient(config Config, group, version string) (rest.Interface, error) {
+	restConfig, err := newBaseRestConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("creating REST config: %s", err)
+	}
+
+	var groupVersion schema.GroupVersion
+	{
+		groupVersion = schema.GroupVersion{
+			Group:   group,
+			Version: version,
+		}
+	}
+
+	var scheme *runtime.Scheme
+	{
+		scheme = runtime.NewScheme()
+		scheme.AddKnownTypes(
+			groupVersion,
+			&PostgreSQLConfig{},
+			&PostgreSQLConfigList{},
+		)
+		apismetav1.AddToGroupVersion(scheme, groupVersion)
+	}
+
+	restConfig.GroupVersion = &groupVersion
+	restConfig.APIPath = "/apis"
+	restConfig.ContentType = runtime.ContentTypeJSON
+	restConfig.NegotiatedSerializer = serializer.DirectCodecFactory{
+		CodecFactory: serializer.NewCodecFactory(scheme),
+	}
+
+	return rest.RESTClientFor(restConfig)
+}
+
+func newBaseRestConfig(config Config) (*rest.Config, error) {
+	var restConfig *rest.Config
+
+	if config.K8sInCluster {
+		var err error
+		restConfig, err = rest.InClusterConfig()
+		if err != nil {
+			return nil, fmt.Errorf("creating incluster config: %s", err)
+		}
+	} else {
+		restConfig = &rest.Config{
+			Host: config.K8sServer,
+			TLSClientConfig: rest.TLSClientConfig{
+				CertFile: config.K8sCrtFile,
+				KeyFile:  config.K8sKeyFile,
+				CAFile:   config.K8sCAFile,
+			},
+		}
+	}
+
+	return restConfig, nil
 }
