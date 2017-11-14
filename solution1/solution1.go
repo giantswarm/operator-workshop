@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/giantswarm/operator-workshop/customobject"
 	"github.com/giantswarm/operator-workshop/postgresqlops"
 )
 
@@ -147,6 +148,12 @@ func Run(ctx context.Context, config Config) error {
 		defer ops.Close()
 	}
 
+	// Create a resource instance providing reconciliation methods.
+	var resource *customobject.Resource
+	{
+		resource = customobject.NewResource(ops)
+	}
+
 	// Start reconciliation loop. In every iteration the operator lists
 	// current custom objects and reconciles towards the state described in
 	// them. The loop is inifinite, can be cancelled with cancelling the
@@ -175,7 +182,7 @@ func Run(ctx context.Context, config Config) error {
 			continue
 		}
 
-		var configs PostgreSQLConfigList
+		var configs customobject.PostgreSQLConfigList
 		err = json.Unmarshal(body, &configs)
 		if err != nil {
 			log.Printf("reconciling: error unmarshalling postgresqlconfigs list: %s body=%#q", err, body)
@@ -194,7 +201,7 @@ func Run(ctx context.Context, config Config) error {
 
 		// Reconcile updates and memorise valid objects. They will be
 		// used later during deletion.
-		var validObjs []*PostgreSQLConfig
+		var validObjs []*customobject.PostgreSQLConfig
 
 		for _, obj := range configs.Items {
 			err := obj.Validate()
@@ -205,7 +212,7 @@ func Run(ctx context.Context, config Config) error {
 
 			validObjs = append(validObjs, obj)
 
-			status, err := processUpdate(ops, obj)
+			status, err := resource.EnsureCreated(obj)
 			if err != nil {
 				log.Printf("reconciling: error: processing update obj=%#v: %s", *obj, err)
 			} else {
@@ -233,14 +240,14 @@ func Run(ctx context.Context, config Config) error {
 					continue
 				}
 
-				obj := &PostgreSQLConfig{
-					Spec: PostgreSQLConfigSpec{
+				obj := &customobject.PostgreSQLConfig{
+					Spec: customobject.PostgreSQLConfigSpec{
 						Database: db.Name,
 						Owner:    db.Owner,
 					},
 				}
 
-				status, err := processDelete(ops, obj)
+				status, err := resource.EnsureDeleted(obj)
 				if err != nil {
 					log.Printf("reconciling: error: processing delete obj=%#v: %s", *obj, err)
 				} else {
@@ -251,64 +258,6 @@ func Run(ctx context.Context, config Config) error {
 
 		time.Sleep(reconciliationInterval)
 	}
-}
-
-func processUpdate(ops *postgresqlops.PostgreSQLOps, obj *PostgreSQLConfig) (status string, err error) {
-	dbs, err := ops.ListDatabases()
-	if err != nil {
-		return "", fmt.Errorf("listing databases: %s", err)
-	}
-
-	var foundDB postgresqlops.Database
-	for _, db := range dbs {
-		if db.Name == obj.Spec.Database {
-			foundDB = db
-			break
-		}
-	}
-
-	if foundDB.Name == "" {
-		err := ops.CreateDatabase(obj.Spec.Database, obj.Spec.Owner)
-		if err != nil {
-			return "", fmt.Errorf("creating database: %s", err)
-		}
-		return "database created", nil
-	}
-
-	if foundDB.Owner != obj.Spec.Owner {
-		err := ops.ChangeDatabaseOwner(obj.Spec.Database, obj.Spec.Owner)
-		if err != nil {
-			return "", fmt.Errorf("chaning owner=%#q: %s", foundDB.Owner, err)
-		}
-		return fmt.Sprintf("owner=%#q changed", foundDB.Owner), nil
-	}
-
-	return "already created", nil
-}
-
-func processDelete(ops *postgresqlops.PostgreSQLOps, obj *PostgreSQLConfig) (status string, err error) {
-	dbs, err := ops.ListDatabases()
-	if err != nil {
-		return "", fmt.Errorf("listing databases: %s", err)
-	}
-
-	var found bool
-	for _, db := range dbs {
-		if db.Name == obj.Spec.Database {
-			found = true
-			break
-		}
-	}
-
-	if found {
-		err := ops.DeleteDatabase(obj.Spec.Database)
-		if err != nil {
-			return "", fmt.Errorf("deleting database: %s", err)
-		}
-		return "database deleted", nil
-	}
-
-	return "already reconcilied", nil
 }
 
 func newHttpClient(config Config) (*http.Client, error) {
