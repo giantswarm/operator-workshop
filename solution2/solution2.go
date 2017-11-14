@@ -1,22 +1,15 @@
-package main
+package solution2
 
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"log"
-	"os"
-	"os/exec"
-	"os/signal"
-	"os/user"
-	"path"
-	"strings"
 	"time"
 
-	"github.com/giantswarm/operator-workshop/mysqlops"
-
+	"github.com/giantswarm/operator-workshop/customobject"
+	"github.com/giantswarm/operator-workshop/postgresqlops"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/rest"
@@ -27,72 +20,35 @@ import (
 	apismetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func init() {
-	log.SetFlags(log.Ldate | log.Ltime | log.LUTC)
-	log.SetPrefix("I ")
-}
-
 type Config struct {
-	K8sServer  string
-	K8sCrtFile string
-	K8sKeyFile string
-	K8sCAFile  string
+	DBHost     string
+	DBPort     int
+	DBUser     string
+	DBPassword string
+
+	K8sInCluster bool
+	K8sServer    string
+	K8sCrtFile   string
+	K8sKeyFile   string
+	K8sCAFile    string
 }
 
-// MySQLConfig is custom object of mysqlconfigs.containerconf.de custom
-// resource.
-type MySQLConfig struct {
+// PostgreSQLConfig embeds customobject.PostgreSQLConfig adding fields required
+// by runtime.Object interface.
+type PostgreSQLConfig struct {
 	apismetav1.TypeMeta   `json:",inline"`
 	apismetav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec MySQLConfigSpec `json:"spec"`
+	customobject.PostgreSQLConfig `json:",inline"`
 }
 
-func (m MySQLConfig) Validate() error {
-	if err := m.Spec.Validate(); err != nil {
-		return fmt.Errorf("spec is not valid: %s", err)
-	}
-	return nil
-}
-
-// MySQLConfigSpec is custom object specification. Represents the desired state
-// towards which the operator reconciles. It also includes information
-// necessary to perform the reconciliation, i.e. database access information.
-type MySQLConfigSpec struct {
-	// Service is service name which points to a MySQL server.
-	Service string `json:"service"`
-	// Port is the MySQL server listen port.
-	Port int `json:"port"`
-
-	// Database is database name to be created.
-	Database string `json:"database"`
-	// Owner is the database owner.
-	Owner string `json:"owner"`
-}
-
-func (s MySQLConfigSpec) Validate() error {
-	if s.Service == "" {
-		return fmt.Errorf("service is not set")
-	}
-	if s.Port == 0 {
-		return fmt.Errorf("port is not set")
-	}
-	if s.Database == "" {
-		return fmt.Errorf("database is not set")
-	}
-	if s.Owner == "" {
-		return fmt.Errorf("owner is not set")
-	}
-	return nil
-}
-
-// MySQLConfigList represents a list of custom objects. It is useful for
-// decoding list API calls.
-type MySQLConfigList struct {
+// PostgreSQLConfigList embeds customobject.PostgreSQLConfigList adding fields
+// required by runtime.Object interface.
+type PostgreSQLConfigList struct {
 	apismetav1.TypeMeta `json:",inline"`
 	apismetav1.ListMeta `json:"metadata,omitempty"`
 
-	Items []*MySQLConfig `json:"items"`
+	customobject.PostgreSQLConfigList `json:",inline"`
 }
 
 // decoder decodes custom objects from a stream. It is used for decoding list
@@ -112,9 +68,9 @@ func newDecoder(stream io.ReadCloser) *decoder {
 func (d *decoder) Decode() (action watch.EventType, object runtime.Object, err error) {
 	var e struct {
 		Type   watch.EventType
-		Object *MySQLConfig
+		Object *PostgreSQLConfig
 	}
-	e.Object = new(MySQLConfig)
+	e.Object = new(PostgreSQLConfig)
 
 	if err := d.jsonDec.Decode(&e); err != nil {
 		return watch.Error, nil, err
@@ -128,83 +84,7 @@ func (d *decoder) Close() {
 	d.stream.Close()
 }
 
-func main() {
-	ctx := context.Background()
-
-	config := parseFlags()
-
-	mainExitCodeCh := make(chan int)
-	mainCtx, mainCancelFunc := context.WithCancel(ctx)
-
-	// Run actual code.
-	go func() {
-		err := mainError(mainCtx, config)
-		if err != nil {
-			log.SetPrefix("E ")
-			log.Printf("%s", err)
-			mainExitCodeCh <- 1
-		}
-		mainExitCodeCh <- 0
-	}()
-
-	sigCh := make(chan os.Signal, 2)
-	signal.Notify(sigCh, os.Interrupt, os.Kill)
-
-	// Handle graceful stop.
-	gracefulStop := false
-	for {
-		select {
-		case code := <-mainExitCodeCh:
-			log.Printf("exiting: code=%d", code)
-			os.Exit(code)
-		case sig := <-sigCh:
-			// On second SIGKILL exit immediately.
-			if sig == os.Kill && gracefulStop {
-				log.Printf("exiting: forced exit code=1")
-				os.Exit(1)
-			}
-			if !gracefulStop {
-				log.Printf("exiting: trying to preform graceful stop")
-				gracefulStop = true
-				mainCancelFunc()
-			}
-		}
-	}
-}
-
-func parseFlags() Config {
-	var config Config
-
-	var homeDir string
-	{
-		u, err := user.Current()
-		if err != nil {
-			homeDir = os.Getenv("HOME")
-		} else {
-			homeDir = u.HomeDir
-		}
-
-	}
-
-	var serverDefault string
-	{
-		out, err := exec.Command("minikube", "ip").Output()
-		if err == nil {
-			minikubeIP := strings.TrimSpace(string(out))
-			serverDefault = "https://" + string(minikubeIP) + ":8443"
-		}
-	}
-
-	flag.StringVar(&config.K8sServer, "kubernetes.server", serverDefault, "Kubernetes API server address.")
-	flag.StringVar(&config.K8sCrtFile, "kubernetes.crt", path.Join(homeDir, ".minikube/apiserver.crt"), "Kubernetes certificate file path.")
-	flag.StringVar(&config.K8sKeyFile, "kubernetes.key", path.Join(homeDir, ".minikube/apiserver.key"), "Kubernetes key file path.")
-	flag.StringVar(&config.K8sCAFile, "kubernetes.ca", path.Join(homeDir, ".minikube/ca.crt"), "Kubernetes CA file path.")
-	flag.Parse()
-
-	return config
-}
-
-func mainError(ctx context.Context, config Config) error {
+func Run(ctx context.Context, config Config) error {
 	k8sClient, err := newK8sExtClient(config)
 	if err != nil {
 		return fmt.Errorf("creating K8s client: %s", err)
@@ -221,16 +101,16 @@ func mainError(ctx context.Context, config Config) error {
 				Kind:       "CustomResourceDefinition",
 			},
 			ObjectMeta: apismetav1.ObjectMeta{
-				Name: "mysqlconfigs.containerconf.de",
+				Name: "postgresqlconfigs.containerconf.de",
 			},
 			Spec: apiextensionsv1beta1.CustomResourceDefinitionSpec{
 				Group:   "containerconf.de",
 				Version: "v1",
 				Scope:   apiextensionsv1beta1.NamespaceScoped,
 				Names: apiextensionsv1beta1.CustomResourceDefinitionNames{
-					Plural:     "mysqlconfigs",
-					Singular:   "mysqlconfig",
-					Kind:       "MySQLConfig",
+					Plural:     "postgresqlconfigs",
+					Singular:   "postgresqlconfig",
+					Kind:       "PostgreSQLConfig",
 					ShortNames: []string{},
 				},
 			},
@@ -255,7 +135,7 @@ func mainError(ctx context.Context, config Config) error {
 		for ; ; attempt++ {
 			log.Printf("checking custom resource readiness attempt=%d", attempt)
 
-			_, err := k8sClient.ApiextensionsV1beta1().CustomResourceDefinitions().Get("mysqlconfigs.containerconf.de", apismetav1.GetOptions{})
+			_, err := k8sClient.ApiextensionsV1beta1().CustomResourceDefinitions().Get("postgresqlconfigs.containerconf.de", apismetav1.GetOptions{})
 			if err != nil && attempt == maxAttempts {
 				return fmt.Errorf("checking custom resource readiness attempt=%d: %s", attempt, err)
 			} else if err != nil {
@@ -268,6 +148,30 @@ func mainError(ctx context.Context, config Config) error {
 		}
 	}
 
+	// Create PostgreSQLOps.
+	var ops *postgresqlops.PostgreSQLOps
+	{
+		config := postgresqlops.Config{
+			Host:     config.DBHost,
+			Port:     config.DBPort,
+			User:     config.DBUser,
+			Password: config.DBPassword,
+		}
+
+		ops, err = postgresqlops.New(config)
+		if err != nil {
+			return fmt.Errorf("creating PostgreSQLOps: %s", err)
+		}
+
+		defer ops.Close()
+	}
+
+	// Create a resource instance providing reconciliation methods.
+	var resource *customobject.Resource
+	{
+		resource = customobject.NewResource(ops)
+	}
+
 	// Start reconciliation loop.
 
 	// newWatcherFunc creates a new watcher instance. It is needed as
@@ -276,7 +180,7 @@ func mainError(ctx context.Context, config Config) error {
 	// NOTE: watcher should be stopped to release all resources associated
 	// with it.
 	newWatcherFunc := func() (watch.Interface, error) {
-		endpoint := "/apis/containerconf.de/v1/watch/mysqlconfigs"
+		endpoint := "/apis/containerconf.de/v1/watch/postgresqlconfigs"
 
 		restClient := k8sClient.Discovery().RESTClient()
 
@@ -293,46 +197,45 @@ func mainError(ctx context.Context, config Config) error {
 		return fmt.Errorf("creating watcher: %s", err)
 	}
 
-	reconciliationCnt := 1
-	for ; ; reconciliationCnt++ {
-		log.Printf("reconciling loopCnt=%d", reconciliationCnt)
+	for {
+		log.Printf("reconciling")
 
 		select {
 		case <-ctx.Done():
-			log.Printf("reconciling loopCnt=%d: context cancelled", reconciliationCnt)
+			log.Printf("reconciling: context cancelled")
 			watcher.Stop()
 			return nil
 		case event, more := <-watcher.ResultChan():
 			// When ResultChan is closed stop current watcher and
 			// create a new one.
 			if !more {
-				log.Printf("reconciling loopCnt=%d: recreating watcher", reconciliationCnt)
+				log.Printf("reconciling: recreating watcher")
 				watcher.Stop()
 				watcher, err = newWatcherFunc()
 				if err != nil {
 					return fmt.Errorf("creating watcher: %s", err)
 				}
-				log.Printf("reconciling loopCnt=%d: recreating watcher: recreated", reconciliationCnt)
+				log.Printf("reconciling: recreating watcher: recreated")
 				continue
 			}
 
-			var obj *MySQLConfig
+			var obj *PostgreSQLConfig
 			{
 				if event.Object == nil {
 					obj = nil
 				} else {
 					var ok bool
 
-					obj, ok = event.Object.(*MySQLConfig)
+					obj, ok = event.Object.(*PostgreSQLConfig)
 					if !ok {
 						// This error means bug in our
 						// code. Decoder is incopatible
 						// with the loop implemenation.
-						return fmt.Errorf("reconciling loopCnt=%d: wrong type %T, want %T", reconciliationCnt, event.Object, &MySQLConfig{})
+						return fmt.Errorf("reconciling: wrong type %T, want %T", event.Object, &PostgreSQLConfig{})
 					}
 					err := obj.Validate()
 					if err != nil {
-						log.Printf("reconciling loopCnt=%d: error invalid obj=%#v: %s", reconciliationCnt, *obj, err)
+						log.Printf("reconciling: error invalid obj=%#v: %s", obj.PostgreSQLConfig, err)
 						continue
 					}
 				}
@@ -344,107 +247,25 @@ func mainError(ctx context.Context, config Config) error {
 			// same thing. Otherwise you most likely don't write
 			// a correct reconciliation.
 			case watch.Added, watch.Modified:
-				status, err := processUpdate(obj)
+				status, err := resource.EnsureCreated(&obj.PostgreSQLConfig)
 				if err != nil {
-					log.Printf("reconciling loopCnt=%d: error: processing update obj=%#v: %s", reconciliationCnt, *obj, err)
+					log.Printf("reconciling: error: processing update obj=%#v: %s", obj.PostgreSQLConfig, err)
 				} else {
-					log.Printf("reconciling loopCnt=%d: reconciled: %s obj=%#v", reconciliationCnt, status, *obj)
+					log.Printf("reconciling: reconciled: %s obj=%#v", status, obj.PostgreSQLConfig)
 				}
 			case watch.Deleted:
-				status, err := processDelete(obj)
+				status, err := resource.EnsureDeleted(&obj.PostgreSQLConfig)
 				if err != nil {
-					log.Printf("reconciling loopCnt=%d: error: processing delete obj=%#v: %s", reconciliationCnt, *obj, err)
+					log.Printf("reconciling: error: processing delete obj=%#v: %s", obj.PostgreSQLConfig, err)
 				} else {
-					log.Printf("reconciling loopCnt=%d: reconciled: %s obj=%#v", reconciliationCnt, status, *obj)
+					log.Printf("reconciling: reconciled: %s obj=%#v", status, obj.PostgreSQLConfig)
 				}
 			case watch.Error:
-				log.Printf("reconciling loopCnt=%d: error: event=%#v", reconciliationCnt, event)
+				log.Printf("reconciling: error: event=%#v", event)
 			default:
-				log.Printf("reconciling loopCnt=%d: error: unknown event type=%#v, unhandled event=%#v", reconciliationCnt, event.Type, event)
+				log.Printf("reconciling: error: unknown event type=%#v, unhandled event=%#v", event.Type, event)
 			}
 		}
-	}
-
-	return nil
-}
-
-func processUpdate(obj *MySQLConfig) (status string, err error) {
-	var ops *mysqlops.MySQLOps
-	{
-		ops, err = mysqlops.New(mysqlops.Config{})
-		if err != nil {
-			return "", fmt.Errorf("creating MySQLOps: %s", err)
-		}
-	}
-
-	// Reconcile MySQLConfig.
-	{
-		dbs, err := ops.ListDatabases()
-		if err != nil {
-			return "", fmt.Errorf("listing databases: %s", err)
-		}
-
-		var foundDB mysqlops.Database
-		for _, db := range dbs {
-			if db.Name == obj.Spec.Database {
-				foundDB = db
-				break
-			}
-		}
-
-		if foundDB.Name == "" {
-			err := ops.CreateDatabase(obj.Spec.Database, obj.Spec.Owner)
-			if err != nil {
-				return "", fmt.Errorf("creating database: %s", err)
-			}
-			return "database created", nil
-		}
-
-		if foundDB.Owner != obj.Spec.Owner {
-			err := ops.ChangeDatabaseOwner(obj.Spec.Database, obj.Spec.Owner)
-			if err != nil {
-				return "", fmt.Errorf("chaning owner=%#q: %s", foundDB.Owner, err)
-			}
-			return fmt.Sprintf("owner=%#q changed", foundDB.Owner), nil
-		}
-
-		return "already reconcilied", nil
-	}
-}
-
-func processDelete(obj *MySQLConfig) (status string, err error) {
-	var ops *mysqlops.MySQLOps
-	{
-		ops, err = mysqlops.New(mysqlops.Config{})
-		if err != nil {
-			return "", fmt.Errorf("creating MySQLOps: %s", err)
-		}
-	}
-
-	// Reconcile MySQLConfig.
-	{
-		dbs, err := ops.ListDatabases()
-		if err != nil {
-			return "", fmt.Errorf("listing databases: %s", err)
-		}
-
-		var foundDB mysqlops.Database
-		for _, db := range dbs {
-			if db.Name == obj.Spec.Database {
-				foundDB = db
-				break
-			}
-		}
-
-		if foundDB.Name != "" {
-			err := ops.DeleteDatabase(obj.Spec.Database)
-			if err != nil {
-				return "", fmt.Errorf("deleting database: %s", err)
-			}
-			return "database deleted", nil
-		}
-
-		return "already reconcilied", nil
 	}
 }
 
