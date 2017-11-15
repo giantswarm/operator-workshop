@@ -208,7 +208,7 @@ func Run(ctx context.Context, config Config) error {
 		var validObjs []*customobject.PostgreSQLConfig
 
 		for _, obj := range configs.Items {
-			err := customobject.Validate(obj)
+			err := customobject.Validate(*obj)
 			if err != nil {
 				log.Printf("reconciling: error invalid object: %s obj=%#v", err, *obj)
 				continue
