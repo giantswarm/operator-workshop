@@ -1,0 +1,8 @@
+apiVersion: containerconf.de/v1
+kind: PostgreSQLConfig
+metadata:
+  name: example
+  namespace: default
+spec:
+  database: example_db
+  owner: containerconf
