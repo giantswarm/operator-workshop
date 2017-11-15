@@ -2,7 +2,11 @@ package customobject
 
 import "fmt"
 
+<<<<<<< HEAD
 func Validate(obj PostgreSQLConfig) error {
+=======
+func Validate(obj *PostgreSQLConfig) error {
+>>>>>>> extract Validate function; move list object to solution1
 	if err := validateSpec(obj.Spec); err != nil {
 		return fmt.Errorf("spec is not valid: %s", err)
 	}
