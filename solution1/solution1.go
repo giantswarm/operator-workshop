@@ -31,6 +31,10 @@ type Config struct {
 	K8sCAFile    string
 }
 
+type PostgreSQLConfigList struct {
+	Items []*customobject.PostgreSQLConfig `json:"items"`
+}
+
 func Run(ctx context.Context, config Config) error {
 	if config.K8sInCluster {
 		return fmt.Errorf("incluster mode is not supported in solution1")
@@ -107,7 +111,7 @@ func Run(ctx context.Context, config Config) error {
 		for ; ; attempt++ {
 			log.Printf("checking custom resource readiness attempt=%d", attempt)
 
-			url := config.K8sServer + "/apis/apiextensions.k8s.io/v1beta1/customresourcedefinitions"
+			url := config.K8sServer + "/apis/containerconf.de/v1/postgresqlconfigs"
 			res, err := k8sClient.Get(url)
 			if err != nil {
 				return fmt.Errorf("checking custom resource readiness attempt=%d url=%s: %s", attempt, url, err)
@@ -204,7 +208,7 @@ func Run(ctx context.Context, config Config) error {
 		var validObjs []*customobject.PostgreSQLConfig
 
 		for _, obj := range configs.Items {
-			err := obj.Validate()
+			err := customobject.Validate(obj)
 			if err != nil {
 				log.Printf("reconciling: error invalid object: %s obj=%#v", err, *obj)
 				continue
