@@ -151,7 +151,7 @@ func Run(ctx context.Context, config Config) error {
 		if !ok {
 			log.Printf("reconciling: wrong type %T, want %T", obj, postgreSQLConfig)
 		}
-		err := postgreSQLConfig.Validate()
+		err := customobject.Validate(postgreSQLConfig.PostgreSQLConfig)
 		if err != nil {
 			log.Printf("reconciling: error invalid obj=%#v: %s", postgreSQLConfig.PostgreSQLConfig, err)
 		}
@@ -169,7 +169,7 @@ func Run(ctx context.Context, config Config) error {
 		if !ok {
 			log.Printf("reconciling: wrong type %T, want %T", obj, postgreSQLConfig)
 		}
-		err := postgreSQLConfig.Validate()
+		err := customobject.Validate(postgreSQLConfig.PostgreSQLConfig)
 		if err != nil {
 			log.Printf("reconciling: error invalid obj=%#v: %s", postgreSQLConfig.PostgreSQLConfig, err)
 		}
