@@ -14,7 +14,7 @@ minikube start --kubernetes-version 'v1.8.0'
 Start PostgreSQL instance inside Kubernetes.
 
 ```bash
-kubectl apply -f postgresql.yaml
+kubectl apply -f ./manifest/postgresql.yaml
 ```
 
 ## Running Example Solutions
