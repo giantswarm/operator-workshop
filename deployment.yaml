@@ -1,0 +1,27 @@
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: operator-workshop
+  namespace: default
+  labels:
+    app: operator-workshop
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: operator-workshop
+    spec:
+      volumes:
+      containers:
+      - name: operator-workshop
+        image: operator-workshop:latest
+        imagePullPolicy: IfNotPresent
+        args:
+        - -postgresql.host=workshop-postgresql
+        - -postgresql.port=5432
+        - -postgresql.user=postgres
+        - -postgresql.password=operator-workshop
+        - -kubernetes.incluster=true
