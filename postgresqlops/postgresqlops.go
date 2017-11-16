@@ -18,6 +18,9 @@ type Database struct {
 type Config struct {
 	Host string
 	Port int
+
+	User     string
+	Password string
 }
 
 // PostgreSQLOps has the database handle for connecting to the database.
@@ -28,7 +31,7 @@ type PostgreSQLOps struct {
 // New creates the connection to the database.
 func New(config Config) (*PostgreSQLOps, error) {
 	// Postgres user and password are hardcoded and match the resources in postgres.yaml.
-	psqlInfo := fmt.Sprintf("host=%s port=%d user=%s password=%s sslmode=disable", config.Host, config.Port, "postgres", "operator-workshop")
+	psqlInfo := fmt.Sprintf("host=%s port=%d user=%s password=%s sslmode=disable", config.Host, config.Port, config.User, config.Password)
 
 	db, err := sql.Open("postgres", psqlInfo)
 	if err != nil {
@@ -40,6 +43,11 @@ func New(config Config) (*PostgreSQLOps, error) {
 	}
 
 	return postgreSQLOps, nil
+}
+
+// Close relases all PosgreSQLOps resources.
+func (p *PostgreSQLOps) Close() error {
+	return p.db.Close()
 }
 
 // CreateDatabase creates a database and owner if they don't exist.
@@ -109,7 +117,7 @@ func (p *PostgreSQLOps) DeleteDatabase(name string) error {
 func (p *PostgreSQLOps) ListDatabases() ([]Database, error) {
 	dbs := []Database{}
 
-	rows, err := p.db.Query("SELECT pg_database.datname, pg_user.usename FROM pg_database, pg_user WHERE pg_database.datdba = pg_user.usesysid")
+	rows, err := p.db.Query("SELECT pg_database.datname, pg_user.usename FROM pg_database, pg_user WHERE pg_database.datdba = pg_user.usesysid AND pg_database.datname NOT IN ('postgres', 'template0', 'template1')")
 	if err != nil {
 		return []Database{}, fmt.Errorf("listing databases: %s", err)
 	}
