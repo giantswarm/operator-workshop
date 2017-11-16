@@ -53,7 +53,7 @@ type PostgreSQLConfigList struct {
 }
 
 func Run(ctx context.Context, config Config) error {
-	k8sClient, err := newK8sExtClient(config)
+	k8sExtClient, err := newK8sExtClient(config)
 	if err != nil {
 		return fmt.Errorf("creating K8s client: %s", err)
 	}
@@ -88,7 +88,7 @@ func Run(ctx context.Context, config Config) error {
 			},
 		}
 
-		_, err := k8sClient.ApiextensionsV1beta1().CustomResourceDefinitions().Create(crd)
+		_, err := k8sExtClient.ApiextensionsV1beta1().CustomResourceDefinitions().Create(crd)
 		if apierrors.IsAlreadyExists(err) {
 			log.Printf("creating custom resource: already exists")
 		} else if err != nil {
@@ -107,7 +107,8 @@ func Run(ctx context.Context, config Config) error {
 		for ; ; attempt++ {
 			log.Printf("checking custom resource readiness attempt=%d", attempt)
 
-			_, err := k8sClient.ApiextensionsV1beta1().CustomResourceDefinitions().Get("postgresqlconfigs.containerconf.de", apismetav1.GetOptions{})
+			endpoint := "/apis/containerconf.de/v1/postgresqlconfigs"
+			err := k8sExtClient.Apiextensions().RESTClient().Get().AbsPath(endpoint).Do().Error()
 			if err != nil && attempt == maxAttempts {
 				return fmt.Errorf("checking custom resource readiness attempt=%d: %s", attempt, err)
 			} else if err != nil {
@@ -195,9 +196,9 @@ func Run(ctx context.Context, config Config) error {
 
 	listWatch := cache.NewListWatchFromClient(k8sCustomRestClient, "postgresqlconfigs", "", fields.Everything())
 
-	_, controller := cache.NewInformer(listWatch, &PostgreSQLConfig{}, time.Second*15, handler)
+	_, informer := cache.NewInformer(listWatch, &PostgreSQLConfig{}, time.Second*15, handler)
 
-	controller.Run(ctx.Done())
+	informer.Run(ctx.Done())
 
 	return nil
 }
