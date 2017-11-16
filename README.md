@@ -65,7 +65,7 @@ CGO_ENABLED=0 GOOS=linux go build -o operator-workshop ./cmd/${name}/main.go
 
 docker build --tag operator-workshop .
 
-kubectl apply -f ./deployment.yaml
+kubectl apply -f ./manifest/operator.yaml
 ```
 
 ## Working with the Operator
@@ -73,7 +73,7 @@ kubectl apply -f ./deployment.yaml
 ### Creating an Example Custom Object
 
 ```bash
-kubectl apply -f ./example_cro.yaml
+kubectl apply -f ./manifest/example_cro.yaml
 ```
 
 ### List databases
@@ -91,7 +91,7 @@ List the PostgreSQL databases and their owners.
 Delete the k8s resources.
 
 ```bash
-kubectl delete -f postgresql.yaml
+kubectl delete -f ./manifest/postgresql.yaml
 ```
 
 ### Connect to the database
