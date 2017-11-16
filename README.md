@@ -11,7 +11,7 @@ Start a minikube.
 minikube start --kubernetes-version 'v1.8.0'
 ```
 
-Start PostgreSQL instance inside Kubernetes.
+Start a PostgreSQL instance inside Kubernetes.
 
 ```bash
 kubectl apply -f ./manifest/postgresql.yaml
@@ -23,8 +23,8 @@ First follow the steps in Setup section.
 
 ### Remote Mode
 
-Remote mode means operator runs outside the Kubernetes cluster and connects to
-the remote Kubernetes API.
+Remote mode means the operator runs outside the Kubernetes cluster and connects
+to the remote Kubernetes API.
 
 ```bash
 name="solution1"
@@ -45,9 +45,9 @@ go run ./cmd/${name}/main.go \
 
 ### In-cluster Mode
 
-Alternative, and most likely desired way to run the operator is the in-cluster
-mode. In that mode operator connects to the Kubernetes API with credentials
-injected by the Kubernetes to the Pod.
+The alternative, and most likely desired way to run the operator is the
+in-cluster mode. In that mode the operator connects to the Kubernetes API with
+credentials injected by the Kubernetes to the Pod.
 
 Only solution1 and solution2 support this mode.
 
