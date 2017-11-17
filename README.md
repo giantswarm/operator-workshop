@@ -49,7 +49,7 @@ The alternative, and most likely desired way to run the operator is the
 in-cluster mode. In that mode the operator connects to the Kubernetes API with
 credentials injected by the Kubernetes to the Pod.
 
-Only solution1 and solution2 support this mode.
+Only solution2 and solution3 support this mode.
 
 To run in in-cluster mode it is necessary to have a docker image in a registry
 visible by the cluster and then create a deployment. When using minikube you can
