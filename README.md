@@ -19,7 +19,18 @@ kubectl apply -f ./manifest/postgresql.yaml
 
 ## Running Example Solutions
 
-First follow the steps in Setup section.
+First follow the steps in [Setup](#setup).
+
+There are three examples provided:
+
+* _solution1_: is an example of the operator using Go http package.
+* _solution2_: is an example of the operator using [client-go][client-go]
+  package.
+* _solution3_: is an example of the operator using [operatorkit][operatorkit]
+  package.
+
+[client-go]: https://github.com/kubernetes/client-go
+[operatorkit]: https://github.com/giantswarm/operatorkit/
 
 ### Remote Mode
 
