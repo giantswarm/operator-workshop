@@ -1,5 +1,13 @@
 # operator-workshop
 
+## Slides
+
+Workshop slides in PDF format.
+
+- [Operators and Custom Resource Definitions](slides/00-Operators-CRDs.pdf)
+- [Exercise 1: REST API](slides/01-Exercise1-REST-API.pdf)
+- [Exercise 2: Kubernetes client-go](slides/02-Exercise-2-client-go.pdf)
+
 ## Setup
 
 During the workshop the operator we create will manage PostgreSQL databases.
